@@ -1,0 +1,47 @@
+{
+  "name": "case-mate",
+  "author": "ch.zhou",
+  "url": "https://github.com/siyuan-note/plugin-sample",
+  "version": "0.1.0",
+  "minAppVersion": "3.7.0",
+  "backends": [
+    "windows",
+    "linux",
+    "darwin",
+    "all"
+  ],
+  "frontends": [
+    "desktop",
+    "mobile",
+    "browser-desktop",
+    "browser-mobile",
+    "desktop-window",
+    "all"
+  ],
+  "disabledInPublish": true,
+  "displayName": {
+    "default": "CaseMate",
+    "zh-CN": "CaseMate"
+  },
+  "description": {
+    "default": "Test case management plugin for SiYuan — automatically parse test cases from documents and track execution status",
+    "zh-CN": "思源笔记测试用例管理插件 — 自动从文档中解析测试用例并跟踪执行状态"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh-CN": "README.zh-CN.md"
+  },
+  "funding": {
+    "openCollective": "",
+    "patreon": "",
+    "github": "",
+    "custom": []
+  },
+  "keywords": [
+    "测试用例",
+    "test case",
+    "测试管理",
+    "test management",
+    "CaseMate"
+  ]
+}
