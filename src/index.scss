@@ -1,22 +1,26 @@
-.plugin-sample {
-  &__custom-tab {
-    background-color: var(--b3-theme-background);
-    height: 100%;
-    width: 100%;
+.case-mate {
+  &__status-bar {
     display: flex;
     justify-content: center;
     align-items: center;
   }
 
-  &__custom-dock {
-    display: flex;
-    justify-content: center;
-    align-items: center;
+  &__config-item {
+    margin-bottom: 8px;
   }
 
-  &__time {
-    background: var(--b3-card-info-background);
-    border-radius: 4px;
-    padding: 2px 8px;
+  &__label {
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+
+  &__hint {
+    color: var(--b3-theme-on-surface-light);
+    font-size: 12px;
+    margin-top: 2px;
+  }
+
+  &__btn {
+    margin-top: 12px;
   }
 }

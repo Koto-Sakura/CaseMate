@@ -1,164 +1,157 @@
-[English](https://github.com/siyuan-note/plugin-sample/blob/main/README.md)
+# CaseMate
 
-# 思源笔记插件示例
+> 思源笔记测试用例管理插件 — 自动从文档中解析测试用例并跟踪执行状态。
 
-## 开始
+## 功能特性
 
-* 通过 <kbd>Use this template</kbd> 按钮将该库文件复制到你自己的库中，请注意库名必须和插件名称一致，默认分支必须为 `main`
-* 将你的库克隆到本地开发文件夹中，为了方便可以直接将开发文件夹放置在 `{工作空间}/data/plugins/` 下
-* 安装 [NodeJS](https://nodejs.org/en/download) 和 [pnpm](https://pnpm.io/installation)，然后在开发文件夹下执行 `pnpm i`
-* 执行 `pnpm run dev` 进行实时编译
-* 在思源中打开集市并在下载选项卡中启用插件
+### ✅ 已完成 (MVP Phase 1)
+
+| 功能 | 说明 |
+| :--- | :--- |
+| **文档解析** | 右键文档 →「解析为测试用例」→ 自动从标题中提取测试用例。启发式解析：标题下若包含列表内容（`- 操作步骤`、`- 预期结果` 等）则判定为用例。兼容不定层级（H3/H4 等） |
+| **一键解析** | 文档树上右键菜单「解析为测试用例」 |
+| **自动轮询** | 每3秒（可配置）监控"用例文档库"（Attribute View），新文档入库后自动解析并创建执行记录 |
+| **块引用跳转** | 主键直接关联到文档中具体用例标题块 — 点击即可跳转 |
+| **状态自动填充** | 新记录自动设为「未测试」 |
+| **时间自动记录** | 状态变为「通过」或「待修复」时，自动填入执行日期 |
+| **项目名称自动填充** | 通过 `getHPathByID` 自动获取父文档名称作为项目名称 |
+| **去重保护** | 通过 `getAttributeView` 检查执行库中是否已存在记录，防止重复解析 |
+| **设置持久化** | 配置（库ID、轮询间隔、排除关键词等）重启后保留 |
+| **国际化** | 支持中文和英文 |
+
+### 🚧 计划中（后续阶段）
+
+| 功能 | 说明 |
+| :--- | :--- |
+| **可视化看板** | 测试执行进度的统计图表 |
+| **报告导出** | 导出测试执行报告 |
+| **批量操作** | 批量修改状态、批量重新解析 |
+
+## 实现原理
+
+### 架构流程
+
+```
+┌─ 用户编写测试用例文档 ──────────────────────────────────────┐
+│  用标题区分每个测试用例                                      │
+│  ### 测试用例名称                                           │
+│  - 操作步骤                                                  │
+│  - 预期结果                                                  │
+│  - 覆盖端                                                    │
+└──────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─ 右键 →「添加到数据库」────────────────────────────────────┐
+│  将文档添加到"用例文档库"（Attribute View）                  │
+└──────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─ 自动轮询检测到新文档 ──────────────────────────────────────┐
+│  每3秒查询 /api/av/renderAttributeView                        │
+│  与已知记录快照比对，发现新增文档                            │
+└──────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─ 解析文档并创建执行记录 ────────────────────────────────────┐
+│  1. 通过 /api/block/getBlockKramdown 获取文档内容            │
+│  2. 启发式提取用例（标题 + 其下包含列表内容）                 │
+│  3. 在执行库中创建记录（使用两段式：先建行再设字段）          │
+│  4. 设置块引用（→ 用例标题块）、状态、项目名称               │
+└──────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─ 用户修改执行库中的状态 ────────────────────────────────────┐
+│  轮询检测到状态变更 → 自动记录执行时间                       │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 数据库结构
+
+#### 用例文档库（用户自行创建）
+
+| 字段 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| 主键 | 块（自动） | 关联测试用例文档 |
+| 创建时间 | 日期 | 文档入库时间 |
+| 项目 | 文本 | 自定义项目名称 |
+
+#### 测试执行库（用户自行创建）
+
+| 字段 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| 主键 | 块（自动） | 关联到具体用例标题块 → 点击跳转 |
+| 项目名称 | 文本 | 自动从父文档名称填充 |
+| 状态 | 单选 | 未测试 / 通过 / 待修复 |
+| 执行日期 | 日期 | 状态变更时自动填入 |
+
+### 关键接口
+
+| API | 用途 |
+| :--- | :--- |
+| `POST /api/av/renderAttributeView` | 查询数据库内容 |
+| `POST /api/av/getAttributeView` | 获取数据库原始定义（item ID） |
+| `POST /api/av/appendAttributeViewDetachedBlocksWithValues` | 创建非绑定行 |
+| `POST /api/av/setAttributeViewBlockAttr` | 更新单元格值（块引用、状态、日期） |
+| `POST /api/block/getBlockKramdown` | 获取文档 Markdown 内容 |
+| `POST /api/filetree/getHPathByID` | 获取文档可读路径 |
+| `POST /api/filetree/getDoc` | 获取文档元信息（父文档 ID） |
+
+## 安装方法
+
+1. 从 [Releases](https://github.com/your-repo/case-mate/releases) 下载最新 `package.zip`
+2. 解压到 `{工作空间}/data/plugins/case-mate/`
+3. 重启思源，在「设置 → 集市 → 下载」中启用插件
+4. 点击顶栏 ✅ 图标配置
+
+## 配置说明
+
+| 设置项 | 说明 |
+| :--- | :--- |
+| 用例文档库 ID | 用例文档库（Attribute View）的 ID |
+| 测试执行库 ID | 测试执行库（Attribute View）的 ID |
+| 轮询间隔 | 检测新文档的频率（1-30秒，默认3秒） |
+| 忽略的标题关键词 | 这些标题不会被识别为测试用例（如：正向主流程、异常分支） |
+| 自动记录时间 | 状态变为「通过」或「待修复」时自动填入执行日期 |
+| 回退清空时间 | 状态改回「未测试」时清空执行日期 |
+
+## 使用指引
+
+### 第一步：创建数据库
+- 在任意文档中插入一个**数据库块**作为「**用例文档库**」，保留默认的「主键」块类型字段
+- 再创建一个「**测试执行库**」，添加字段：项目名称（文本）、状态（单选：未测试/通过/待修复）、执行日期（日期）
+
+### 第二步：编写测试用例文档
+- 用 Markdown 标题（### / ####）区分每个测试用例
+- 标题下用列表内容（- 操作步骤、- 预期结果等）描述用例详情
+
+### 第三步：解析为执行记录
+- **自动方式**：右键文档 →「添加到数据库」→ 选择用例文档库，插件自动检测并解析
+- **手动方式**：右键文档 →「解析为测试用例」
+
+### 第四步：跟踪执行状态
+- 打开测试执行库
+- 修改状态为「通过」或「待修复」→ 执行日期自动填入
+- 点击主键列 → 直接跳转到源文档中对应的用例位置
 
 ## 开发
 
-* i18n/*
-* icon.png (160*160)
-* index.css
-* index.js
-* plugin.json
-* preview.png (1024*768)
-* README*.md
-* [前端 API](https://github.com/siyuan-note/petal)
-* [后端 API](https://github.com/siyuan-note/siyuan/blob/master/API_zh_CN.md)
+```bash
+# 安装依赖
+pnpm install
 
-## 国际化
+# 开发模式（文件监听）
+pnpm run dev:app
 
-国际化方面我们主要考虑的是支持多语言，具体需要完成以下工作：
+# 生产构建
+pnpm run build
 
-* 插件自身的元信息，比如插件描述和自述文件
-  * plugin.json 中的 `displayName`、`description` 和 `readme` 字段，以及对应的 README*.md 文件
-* 插件中使用的文本，比如按钮文字和提示信息
-  * src/i18n/*.json 语言配置文件
-  * 代码中使用 `this.i18.key` 获取文本
-
-建议插件至少支持英文和简体中文，这样可以方便更多人使用。不支持的语种不需要在 plugin.json 中的 `displayName`、`description` 和 `readme` 字段中声明。
-
-## plugin.json
-
-一个典型的示例如下：
-
-```json
-{
-  "name": "plugin-sample",
-  "author": "Vanessa",
-  "url": "https://github.com/siyuan-note/plugin-sample",
-  "version": "0.4.2",
-  "minAppVersion": "3.3.0",
-  "backends": ["all"],
-  "frontends": ["all"],
-  "disabledInPublish": false,
-  "displayName": {
-    "default": "Plugin Sample",
-    "zh-CN": "插件示例"
-  },
-  "description": {
-    "default": "This is a plugin development sample",
-    "zh-CN": "这是一个插件开发示例"
-  },
-  "readme": {
-    "default": "README.md",
-    "zh-CN": "README.zh-CN.md"
-  },
-  "funding": {
-    "custom": ["https://ld246.com/sponsor"]
-  },
-  "keywords": [
-    "开发者参考",
-    "developer reference",
-    "示例插件"
-  ]
-}
+# 代码检查
+pnpm run lint
 ```
 
-* `name`：插件包名，必须和 GitHub 仓库名一致，且不能与集市中的其他插件重复
-* `author`：插件作者名
-* `url`：插件仓库地址
-* `version`：插件版本号，需要遵循 [semver](https://semver.org/lang/zh-CN/) 规范
-* `minAppVersion`：插件支持的最低思源笔记版本号
-* `disabledInPublish`：使用发布服务时是否禁用该插件，默认为 false，即不禁用
-* `backends`：插件需要的后端环境，可选值为 `windows`, `linux`, `darwin`, `docker`, `android`, `ios`, `harmony` 和 `all`
-  * `windows`：Windows 桌面端
-  * `linux`：Linux 桌面端
-  * `darwin`：macOS 桌面端
-  * `docker`：Docker 端
-  * `android`：Android 端
-  * `ios`：iOS 端
-  * `harmony`：鸿蒙端
-  * `all`：所有环境
-* `frontends`：插件需要的前端环境，可选值为 `desktop`, `desktop-window`, `mobile`, `browser-desktop`, `browser-mobile` 和 `all`
-  * `desktop`：桌面端
-  * `desktop-window`：桌面端页签转换的独立窗口
-  * `mobile`：移动端
-  * `browser-desktop`：桌面端浏览器
-  * `browser-mobile`：移动端浏览器
-  * `all`：所有环境
-* `displayName`：插件名称（纯文本），在插件集市列表中显示
-  * `default`：默认语言，必须存在。如果插件支持英文，此处应使用英文
-  * `zh-CN`、`en` 等其他语言：可选，须为 [BCP 47](https://tools.ietf.org/html/bcp47) 标签（如 `zh-CN`、`zh-TW`、`en`、`ja`、`pt-BR`）
-* `description`：插件描述（纯文本），在插件集市列表中显示
-  * `default`：默认语言，必须存在。如果插件支持英文，此处应使用英文
-  * `zh-CN`、`en` 等其他语言：可选，须为 BCP 47 标签
-* `readme`：自述文件名，在插件集市详情页中显示
-  * `default`：默认语言，必须存在。如果插件支持英文，此处应使用英文
-  * `zh-CN`、`en` 等其他语言：可选，须为 BCP 47 标签
-* `funding`：插件赞助信息，集市仅显示其中一种
-  * `openCollective`：Open Collective 名称
-  * `patreon`：Patreon 名称
-  * `github`：GitHub 登录名
-  * `custom`：自定义赞助链接列表
-* `keywords`：搜索关键字列表，用于集市搜索功能，补充 `name`、`author`、`displayName`、`description` 字段值以外的搜索关键词
+## 版本历史
 
-## 打包
-
-无论使用何种方式编译打包，我们最终需要生成一个 package.zip，它至少包含如下文件：
-
-* i18n/* (如果插件支持多语言，则需要将语言文件打包到该目录下，否则不需要该目录)
-* icon.png (建议尺寸为 160*160、文件大小不超过 20KB)
-* index.css
-* index.js
-* plugin.json
-* preview.png (建议尺寸为 1024*768、文件大小不超过 200KB)
-* README*.md
-
-## 上架集市
-
-* 执行 `pnpm run build` 生成 package.zip
-* 在 GitHub 上创建一个新的发布，使用插件版本号作为 “Tag version”，示例 https://github.com/siyuan-note/plugin-sample/releases
-* 上传 package.zip 作为二进制附件
-* 提交发布
-
-如果是第一次发布版本，还需要创建一个 PR 到 [Community Bazaar](https://github.com/siyuan-note/bazaar) 社区集市仓库，修改该库的 plugins.json。该文件是所有社区插件库的索引，格式为：
-
-```json
-{
-  "repos": [
-    "username/reponame"
-  ]
-}
-```
-
-PR 被合并以后集市会通过 GitHub Actions 自动更新索引并部署。后续发布新版本插件时只需要按照上述步骤创建新的发布即可，不需要再 PR 社区集市仓库。
-
-正常情况下，社区集市仓库每隔 1 小时会自动更新索引并部署，可在 https://github.com/siyuan-note/bazaar/actions 查看部署状态。
-
-## 开发者须知
-
-开发者需注意以下规范。
-
-### 1. 读写文件规范
-
-插件或者外部扩展如果有直接读取或者写入 data 下文件的需求，请通过调用内核 API 来实现，**不要自行调用 `fs` 或者其他 electron、nodejs API**，否则可能会导致数据同步时分块丢失，造成云端数据损坏。
-
-相关 API 见 `/api/file/*`（例如 `/api/file/getFile` 等）。
-
-### 2. Daily Note 属性规范
-
-思源在创建日记的时候会自动为文档添加 custom-dailynote-yyyymmdd 属性，以方便将日记文档同普通文档区分。
-
-> 详情请见 [Github Issue #9807](https://github.com/siyuan-note/siyuan/issues/9807)。
-
-开发者在开发手动创建 Daily Note 的功能时请注意：
-
-* 如果调用了 `/api/filetree/createDailyNote` 创建日记，那么文档会自动添加这个属性，无需开发者特别处理
-* 如果是开发者代码手动创建文档（例如使用 `createDocWithMd` API 创建日记），请手动为文档添加该属性
+### v0.1.0 (MVP Phase 1)
+- 实现文档解析、状态填充、时间自动记录、项目名称自动填充
+- 支持右键菜单解析和自动轮询检测
+- 去重保护、设置持久化、中英文国际化

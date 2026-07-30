@@ -1,984 +1,982 @@
 import {
     Plugin,
     showMessage,
-    confirm,
-    Dialog,
-    Menu,
-    openTab,
-    adaptHotkey,
-    getFrontend,
-    getBackend,
     Setting,
     fetchPost,
-    Protyle,
-    openWindow,
-    IOperation,
-    Constants,
-    openMobileFileById,
-    lockScreen,
-    ICard,
-    ICardData,
-    Custom,
-    exitSiYuan,
-    getModelByDockType,
-    getAllEditor,
-    Files,
-    platformUtils,
-    openSetting,
-    openAttributePanel,
-    saveLayout,
-    IMenuItem,
-    IKernelPluginState,
-    IKernelPluginRpcCall,
 } from "siyuan";
 import "./index.scss";
 
-const STORAGE_NAME = "menu-config";
-const TAB_TYPE = "custom_tab";
-const DOCK_TYPE = "dock_tab";
+// ── Types ─────────────────────────────────────────────────────────────────
 
-export default class PluginSample extends Plugin {
-    private custom: () => Custom;
-    private isMobile: boolean;
-    private blockIconEventBindThis = this.blockIconEvent.bind(this);
+interface CaseMateConfig {
+    caseDBID: string;
+    execDBID: string;
+    pollInterval: number;
+    excludeKeywords: string;
+    autoRecordTime: boolean;
+    clearTimeOnReset: boolean;
+}
 
-    updateProtyleToolbar(toolbar: Array<string | IMenuItem>) {
-        toolbar.push("|");
-        toolbar.push({
-            name: "insert-smail-emoji",
-            icon: "iconEmoji",
-            hotkey: "⇧⌘I",
-            tipPosition: "n",
-            tip: this.i18n.insertEmoji,
-            click(protyle: Protyle) {
-                protyle.insert("😊");
-            },
+interface FieldDef {
+    id: string;
+    name: string;
+    type: string;
+}
+
+interface RowCell {
+    value: any;
+}
+
+interface RenderViewResponse {
+    id: string;
+    name: string;
+    viewType: string;
+    viewID: string;
+    view: {
+        columns: FieldDef[];
+        rows: {
+            id: string;
+            cells: Record<string, RowCell>;
+        }[];
+        rowCount: number;
+    };
+}
+
+const DEFAULT_CONFIG: CaseMateConfig = {
+    caseDBID: "",
+    execDBID: "",
+    pollInterval: 3,
+    excludeKeywords: "正向主流程,异常分支,界面校验,兼容性,安全性,UI 适配,完整链路回归测试",
+    autoRecordTime: true,
+    clearTimeOnReset: false,
+};
+
+const POLL_INTERVAL_MIN = 1;
+const POLL_INTERVAL_MAX = 30;
+
+// 执行库的状态字段值
+const STATUS_UNTESTED = "未测试";
+const STATUS_PASSED = "通过";
+const STATUS_NEEDS_FIX = "待修复";
+
+// 执行库的字段名（用户创建数据库时需使用这些名称）
+const FIELD_PROJECT_NAME = "项目名称";
+const FIELD_STATUS = "状态";
+const FIELD_EXEC_DATE = "执行日期";
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+
+function fetchPostAsync<T = any>(url: string, data: any): Promise<T> {
+    return new Promise((resolve, reject) => {
+        fetchPost(url, data, (response: any) => {
+            if (response.code === 0) {
+                resolve(response.data as T);
+            } else {
+                reject(new Error(response.msg || `API error: ${url}`));
+            }
         });
-        return toolbar;
+    });
+}
+
+/** 从 renderAttributeView 响应中提取字段名 → keyID 的映射 */
+function buildFieldMap(columns: FieldDef[]): Record<string, string> {
+    const map: Record<string, string> = {};
+    for (const col of columns) {
+        map[col.name] = col.id;
+    }
+    return map;
+}
+
+/** 从 renderAttributeView 列信息中找出主键（block类型）字段ID */
+function findPrimaryKeyField(columns: FieldDef[]): FieldDef | undefined {
+    // 第一个 block 类型的字段通常是主键
+    return columns.find(c => c.type === "block");
+}
+
+/** 从单元格值中提取关联的 blockID */
+function getCellBlockID(cell: RowCell): string | undefined {
+    if (!cell || !cell.value) return undefined;
+    const v = cell.value;
+    if (v.block && v.block.id) return v.block.id;
+    if (v.type === "block" && v.id) return v.id;
+    return undefined;
+}
+
+function isHeadingLine(line: string): { isHeading: boolean; level: number; text: string } {
+    const m = line.match(/^(#{1,6})\s+(.+)/);
+    if (m) {
+        return { isHeading: true, level: m[1].length, text: m[2].trim() };
+    }
+    return { isHeading: false, level: 0, text: "" };
+}
+
+function hasListContent(lines: string[]): boolean {
+    return lines.some(l => /^\s*[-*]\s/.test(l.trim()));
+}
+
+interface CaseInfo {
+    name: string;
+    blockID: string;
+}
+
+function extractTestCases(kramdown: string, excludeKeywords: string[]): CaseInfo[] {
+    const lines = kramdown.split("\n");
+    const headings: { level: number; text: string; lineIndex: number }[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        const r = isHeadingLine(lines[i]);
+        if (r.isHeading) {
+            headings.push({ level: r.level, text: r.text, lineIndex: i });
+        }
     }
 
-    onload() {
-        this.kernel.rpc.bind("unload", this.onKernelPluginUnload);
-        this.kernel.rpc.bind("notify", this.onKernelPluginNotify);
-        this.eventBus.on("kernel-plugin-state-change", this.onKernelPluginStateChange);
+    if (headings.length === 0) return [];
 
-        this.data[STORAGE_NAME] = {readonlyText: "Readonly"};
+    const cases: CaseInfo[] = [];
+    for (let i = 0; i < headings.length; i++) {
+        const h = headings[i];
+        const nextH = headings[i + 1];
+        if (excludeKeywords.some(kw => h.text.includes(kw))) continue;
 
-        const frontEnd = getFrontend();
-        this.isMobile = frontEnd === "mobile" || frontEnd === "browser-mobile";
-        // 图标的制作参见帮助文档
-        this.addIcons(`<symbol id="iconFace" viewBox="0 0 32 32">
-<path d="M13.667 17.333c0 0.92-0.747 1.667-1.667 1.667s-1.667-0.747-1.667-1.667 0.747-1.667 1.667-1.667 1.667 0.747 1.667 1.667zM20 15.667c-0.92 0-1.667 0.747-1.667 1.667s0.747 1.667 1.667 1.667 1.667-0.747 1.667-1.667-0.747-1.667-1.667-1.667zM29.333 16c0 7.36-5.973 13.333-13.333 13.333s-13.333-5.973-13.333-13.333 5.973-13.333 13.333-13.333 13.333 5.973 13.333 13.333zM14.213 5.493c1.867 3.093 5.253 5.173 9.12 5.173 0.613 0 1.213-0.067 1.787-0.16-1.867-3.093-5.253-5.173-9.12-5.173-0.613 0-1.213 0.067-1.787 0.16zM5.893 12.627c2.28-1.293 4.040-3.4 4.88-5.92-2.28 1.293-4.040 3.4-4.88 5.92zM26.667 16c0-1.040-0.16-2.040-0.44-2.987-0.933 0.2-1.893 0.32-2.893 0.32-4.173 0-7.893-1.92-10.347-4.92-1.4 3.413-4.187 6.093-7.653 7.4 0.013 0.053 0 0.12 0 0.187 0 5.88 4.787 10.667 10.667 10.667s10.667-4.787 10.667-10.667z"></path>
-</symbol>
-<symbol id="iconSaving" viewBox="0 0 32 32">
-<path d="M20 13.333c0-0.733 0.6-1.333 1.333-1.333s1.333 0.6 1.333 1.333c0 0.733-0.6 1.333-1.333 1.333s-1.333-0.6-1.333-1.333zM10.667 12h6.667v-2.667h-6.667v2.667zM29.333 10v9.293l-3.76 1.253-2.24 7.453h-7.333v-2.667h-2.667v2.667h-7.333c0 0-3.333-11.28-3.333-15.333s3.28-7.333 7.333-7.333h6.667c1.213-1.613 3.147-2.667 5.333-2.667 1.107 0 2 0.893 2 2 0 0.28-0.053 0.533-0.16 0.773-0.187 0.453-0.347 0.973-0.427 1.533l3.027 3.027h2.893zM26.667 12.667h-1.333l-4.667-4.667c0-0.867 0.12-1.72 0.347-2.547-1.293 0.333-2.347 1.293-2.787 2.547h-8.227c-2.573 0-4.667 2.093-4.667 4.667 0 2.507 1.627 8.867 2.68 12.667h2.653v-2.667h8v2.667h2.68l2.067-6.867 3.253-1.093v-4.707z"></path>
-</symbol>`);
+        const contentStart = h.lineIndex + 1;
+        const contentEnd = nextH ? nextH.lineIndex : lines.length;
+        const contentLines = lines.slice(contentStart, contentEnd);
 
-        this.custom = this.addTab({
-            type: TAB_TYPE,
-            init() {
-                this.element.innerHTML = `<div class="plugin-sample__custom-tab">${this.data.text}</div>`;
-            },
-            beforeDestroy() {
-                console.log("before destroy tab:", TAB_TYPE);
-            },
-            destroy() {
-                console.log("destroy tab:", TAB_TYPE);
-            },
-        });
+        if (hasListContent(contentLines)) {
+            // 从 kramdown 属性行中提取标题块的 ID: {: id="xxx" ...}
+            let blockID = "";
+            for (let j = 1; j <= 2 && h.lineIndex + j < lines.length; j++) {
+                const attrLine = lines[h.lineIndex + j].trim();
+                const m = attrLine.match(/\{:.*\sid="([^"]+)"/);
+                if (m) { blockID = m[1]; break; }
+            }
+            cases.push({ name: h.text, blockID });
+        }
+    }
+    return cases;
+}
 
-        this.addCommand({
-            langKey: "showDialog",
-            hotkey: "⇧⌘O",
-            callback: () => {
-                this.showDialog();
-            },
-        });
+// ── Plugin Main Class ──────────────────────────────────────────────────────
 
-        this.addCommand({
-            langKey: "getTab",
-            hotkey: "⇧⌘M",
-            globalCallback: () => {
-                console.log(this.getOpenedTab());
-            },
-        });
-        this.addDock({
-            config: {
-                position: "LeftBottom",
-                size: {width: 200, height: 0},
-                icon: "iconSaving",
-                title: "Custom Dock",
-                hotkey: "⌥⌘W",
-            },
-            data: {
-                text: "This is my custom dock",
-            },
-            type: DOCK_TYPE,
-            resize() {
-                console.log(DOCK_TYPE + " resize");
-            },
-            update() {
-                console.log(DOCK_TYPE + " update");
-            },
-            init: (dock) => {
-                if (this.isMobile) {
-                    dock.element.innerHTML = `<div class="toolbar toolbar--border toolbar--dark">
-    <svg class="toolbar__icon"><use xlink:href="#iconEmoji"></use></svg>
-        <div class="toolbar__text">Custom Dock</div>
-    </div>
-    <div class="fn__flex-1 plugin-sample__custom-dock">
-        ${dock.data.text}
-    </div>
-</div>`;
-                } else {
-                    dock.element.innerHTML = `<div class="fn__flex-1 fn__flex-column">
-    <div class="block__icons">
-        <div class="block__logo">
-            <svg class="block__logoicon"><use xlink:href="#iconEmoji"></use></svg>Custom Dock
-        </div>
-        <span class="fn__flex-1 fn__space"></span>
-        <span data-type="min" class="block__icon ariaLabel" data-position="north" aria-label="Min ${
-                        adaptHotkey("⌘W")
-                    }"><svg><use xlink:href="#iconMin"></use></svg></span>
-    </div>
-    <div class="fn__flex-1 plugin-sample__custom-dock">
-        ${dock.data.text}
-    </div>
-</div>`;
-                }
-            },
-            destroy() {
-                console.log("destroy dock:", DOCK_TYPE);
-            },
-        });
+const STORAGE_NAME = "case-mate-config";
 
-        const textareaElement = document.createElement("textarea");
-        this.setting = new Setting({
-            confirmCallback: () => {
-                this.saveData(STORAGE_NAME, {readonlyText: textareaElement.value}).catch(e => {
-                    showMessage(`[${this.name}] save data [${STORAGE_NAME}] fail: `, e);
-                });
-            },
-        });
-        this.setting.addItem({
-            title: "Readonly text",
-            direction: "row",
-            description: "Open plugin url in browser",
-            createActionElement: () => {
-                textareaElement.className = "b3-text-field fn__block";
-                textareaElement.placeholder = "Readonly text in the menu";
-                textareaElement.value = this.data[STORAGE_NAME].readonlyText;
-                return textareaElement;
-            },
-        });
-        const btnaElement = document.createElement("button");
-        btnaElement.className = "b3-button b3-button--outline fn__flex-center fn__size200";
-        btnaElement.textContent = "Open";
-        btnaElement.addEventListener("click", () => {
-            window.open("https://github.com/siyuan-note/plugin-sample");
-        });
-        this.setting.addItem({
-            title: "Open plugin url",
-            description: "Open plugin url in browser",
-            actionElement: btnaElement,
-        });
+export default class CaseMatePlugin extends Plugin {
+    private config: CaseMateConfig = { ...DEFAULT_CONFIG };
+    private pollTimer: number | null = null;
 
-        this.protyleSlash = [{
-            filter: ["insert emoji 😊", "插入表情 😊", "crbqwx"],
-            html:
-                `<div class="b3-list-item__first"><span class="b3-list-item__text">${this.i18n.insertEmoji}</span><span class="b3-list-item__meta">😊</span></div>`,
-            id: "insertEmoji",
-            callback(protyle: Protyle) {
-                protyle.insert("😊");
-            },
-        }];
+    // 已知记录快照：Map<blockID, recordID>
+    private knownCaseRecords: Map<string, string> = new Map();
+    // 执行库快照：Map<recordID, { status: string; execDate: string }>
+    private knownExecRecords: Map<string, { status: string; execDate: string }> = new Map();
+    private firstPollComplete = false;
 
-        this.protyleOptions = {
-            toolbar: [
-                "block-ref",
-                "a",
-                "|",
-                "text",
-                "strong",
-                "em",
-                "u",
-                "s",
-                "mark",
-                "sup",
-                "sub",
-                "clear",
-                "|",
-                "code",
-                "kbd",
-                "tag",
-                "inline-math",
-                "inline-memo",
-            ],
-        };
+    // 缓存执行库的字段映射，避免每次查询
+    private execFieldCache: Record<string, string> | null = null;
+    private cachedExecDBID: string = "";
 
-        console.log(this.i18n.helloPlugin);
+    // ── 生命周期 ────────────────────────────────────────────────────────────
+
+    async onload() {
+        console.log("CaseMate onload");
+        try {
+            const data = await this.loadData(STORAGE_NAME);
+            if (data && typeof data === "object") {
+                this.config = { ...DEFAULT_CONFIG, ...data };
+                console.log("CaseMate config loaded:", JSON.stringify(this.config));
+            }
+        } catch (e) {
+            console.log("CaseMate loadData failed, using defaults:", e);
+            this.config = { ...DEFAULT_CONFIG };
+        }
+        this.buildSetting();
     }
 
     onLayoutReady() {
-        const topBarElement = this.addTopBar({
-            icon: "iconFace",
-            title: this.i18n.addTopBarIcon,
+        console.log("CaseMate onLayoutReady, config:", JSON.stringify(this.config));
+        this.addTopBar({
+            icon: "iconCheck",
+            title: "CaseMate",
             position: "right",
             callback: () => {
-                if (this.isMobile) {
-                    this.addMenu();
-                } else {
-                    let rect = topBarElement.getBoundingClientRect();
-                    // 如果被隐藏，则使用更多按钮
-                    if (rect.width === 0) {
-                        rect = document.querySelector("#barMore").getBoundingClientRect();
-                    }
-                    if (rect.width === 0) {
-                        rect = document.querySelector("#barPlugins").getBoundingClientRect();
-                    }
-                    this.addMenu(rect);
-                }
+                // 直接打开插件设置面板
+                this.setting.open("CaseMate");
             },
         });
-        const statusIconTemp = document.createElement("template");
-        statusIconTemp.innerHTML = `<div class="toolbar__item ariaLabel" aria-label="Remove plugin-sample Data">
-    <svg>
-        <use xlink:href="#iconTrashcan"></use>
-    </svg>
-</div>`;
-        statusIconTemp.content.firstElementChild.addEventListener("click", () => {
-            confirm("⚠️", this.i18n.confirmRemove.replace("${name}", this.name), () => {
-                this.removeData(STORAGE_NAME).then(() => {
-                    this.data[STORAGE_NAME] = {readonlyText: "Readonly"};
-                    showMessage(`[${this.name}]: ${this.i18n.removedData}`);
-                }).catch(e => {
-                    showMessage(`[${this.name}] remove data [${STORAGE_NAME}] fail: `, e);
-                });
-            });
-        });
-        this.addStatusBar({
-            element: statusIconTemp.content.firstElementChild as HTMLElement,
-        });
-        this.loadData(STORAGE_NAME).catch(e => {
-            console.log(`[${this.name}] load data [${STORAGE_NAME}] fail: `, e);
-        });
-        console.log(`frontend: ${getFrontend()}; backend: ${getBackend()}`);
+        this.eventBus.on("open-menu-doctree", this.onDocTreeMenu.bind(this));
+        this.startPolling();
     }
 
     onunload() {
-        console.log(this.i18n.byePlugin);
-
-        this.kernel.rpc.unbind("unload", this.onKernelPluginUnload);
-        this.kernel.rpc.unbind("notify", this.onKernelPluginNotify);
-        this.eventBus.off("kernel-plugin-state-change", this.onKernelPluginStateChange);
+        console.log("CaseMate onunload");
+        this.stopPolling();
+        this.eventBus.off("open-menu-doctree", this.onDocTreeMenu.bind(this));
     }
 
-    uninstall() {
-        // 卸载插件时删除插件数据
-        // Delete plugin data when uninstalling the plugin
-        this.removeData(STORAGE_NAME).catch(e => {
-            showMessage(`uninstall [${this.name}] remove data [${STORAGE_NAME}] fail: ${e.msg}`);
+    // ── 设置面板 ────────────────────────────────────────────────────────────
+
+    private buildSetting() {
+        const caseDBInput = document.createElement("input");
+        caseDBInput.className = "b3-text-field fn__block";
+        caseDBInput.placeholder = "请输入用例文档库的 Attribute View ID";
+        caseDBInput.value = this.config.caseDBID;
+
+        const execDBInput = document.createElement("input");
+        execDBInput.className = "b3-text-field fn__block";
+        execDBInput.placeholder = "请输入测试执行库的 Attribute View ID";
+        execDBInput.value = this.config.execDBID;
+
+        const intervalInput = document.createElement("input");
+        intervalInput.className = "b3-text-field fn__block";
+        intervalInput.type = "number";
+        intervalInput.min = String(POLL_INTERVAL_MIN);
+        intervalInput.max = String(POLL_INTERVAL_MAX);
+        intervalInput.value = String(this.config.pollInterval);
+
+        const excludeInput = document.createElement("input");
+        excludeInput.className = "b3-text-field fn__block";
+        excludeInput.placeholder = "正向主流程,异常分支,界面校验,...";
+        excludeInput.value = this.config.excludeKeywords;
+
+        const autoRecordCheck = document.createElement("input");
+        autoRecordCheck.type = "checkbox";
+        autoRecordCheck.checked = this.config.autoRecordTime;
+
+        const clearOnResetCheck = document.createElement("input");
+        clearOnResetCheck.type = "checkbox";
+        clearOnResetCheck.checked = this.config.clearTimeOnReset;
+
+        this.setting = new Setting({
+            confirmCallback: () => {
+                this.config.caseDBID = caseDBInput.value.trim();
+                this.config.execDBID = execDBInput.value.trim();
+                this.config.pollInterval = Math.max(POLL_INTERVAL_MIN,
+                    Math.min(POLL_INTERVAL_MAX, parseInt(intervalInput.value) || 3));
+                this.config.excludeKeywords = excludeInput.value.trim();
+                this.config.autoRecordTime = autoRecordCheck.checked;
+                this.config.clearTimeOnReset = clearOnResetCheck.checked;
+
+                this.saveData(STORAGE_NAME, this.config).then(() => {
+                    showMessage(this.i18n.saveSuccess);
+                    this.restartPolling();
+                }).catch((e: any) => {
+                    showMessage(`${this.i18n.saveFail}: ${e}`);
+                });
+            },
+        });
+
+        this.setting.addItem({
+            title: this.i18n.caseDBID,
+            direction: "row",
+            description: this.i18n.caseDBIDHint,
+            createActionElement: () => caseDBInput,
+        });
+
+        this.setting.addItem({
+            title: this.i18n.execDBID,
+            direction: "row",
+            description: this.i18n.execDBIDHint,
+            createActionElement: () => execDBInput,
+        });
+
+        this.setting.addItem({
+            title: this.i18n.pollInterval,
+            direction: "row",
+            description: this.i18n.pollIntervalHint,
+            createActionElement: () => intervalInput,
+        });
+
+        this.setting.addItem({
+            title: this.i18n.excludeKeywords,
+            direction: "row",
+            description: this.i18n.excludeKeywordsHint,
+            createActionElement: () => excludeInput,
+        });
+
+        this.setting.addItem({
+            title: this.i18n.autoRecordTime,
+            direction: "row",
+            description: this.i18n.autoRecordTimeHint,
+            createActionElement: () => autoRecordCheck,
+        });
+
+        this.setting.addItem({
+            title: this.i18n.clearTimeOnReset,
+            direction: "row",
+            description: this.i18n.clearTimeOnResetHint,
+            createActionElement: () => clearOnResetCheck,
         });
     }
 
-    // 使用 saveData() 存储的数据发生变更时触发，注释掉则自动禁用插件再重新启用
-    // Triggered when data stored using saveData() changes. If commented out, the plugin will be automatically disabled and then re-enabled.
-    // onDataChanged() {
-    //     console.log("onDataChanged");
-    // }
+    // ── 轮询管理 ────────────────────────────────────────────────────────────
 
-    async updateCards(options: ICardData) {
-        options.cards.sort((a: ICard, b: ICard) => {
-            if (a.blockID < b.blockID) {
-                return -1;
-            }
-            if (a.blockID > b.blockID) {
-                return 1;
-            }
-            return 0;
-        });
-        return options;
-    }
-
-    /* 自定义设置
-    openSetting() {
-        const dialog = new Dialog({
-            title: this.name,
-            content: `<div class="b3-dialog__content"><textarea class="b3-text-field fn__block" placeholder="readonly text in the menu"></textarea></div>
-<div class="b3-dialog__action">
-    <button class="b3-button b3-button--cancel">${this.i18n.cancel}</button><div class="fn__space"></div>
-    <button class="b3-button b3-button--text">${this.i18n.save}</button>
-</div>`,
-            width: this.isMobile ? "92vw" : "520px",
-        });
-        const inputElement = dialog.element.querySelector("textarea");
-        inputElement.value = this.data[STORAGE_NAME].readonlyText;
-        const btnsElement = dialog.element.querySelectorAll(".b3-button");
-        dialog.bindInput(inputElement, () => {
-            (btnsElement[1] as HTMLButtonElement).click();
-        });
-        inputElement.focus();
-        btnsElement[0].addEventListener("click", () => {
-            dialog.destroy();
-        });
-        btnsElement[1].addEventListener("click", () => {
-            this.saveData(STORAGE_NAME, {readonlyText: inputElement.value});
-            dialog.destroy();
+    private startPolling() {
+        this.stopPolling();
+        const intervalMs = (this.config.pollInterval || 3) * 1000;
+        this.pollTimer = window.setInterval(() => {
+            this.poll().catch(err => {
+                console.warn("CaseMate poll error:", err);
+            });
+        }, intervalMs);
+        this.poll().catch(err => {
+            console.warn("CaseMate first poll error:", err);
         });
     }
-    */
 
-    private readonly eventBusPaste = (event: any) => {
-        // 如果需异步处理请调用 preventDefault， 否则会进行默认处理
-        event.preventDefault();
-        // 如果使用了 preventDefault，必须调用 resolve，否则程序会卡死
-        event.detail.resolve({
-            textPlain: event.detail.textPlain.trim(),
-        });
-    };
-
-    private readonly eventBusLog = ({detail}: any) => {
-        console.log(detail);
-    };
-
-    private readonly onKernelPluginStateChange = async ({detail}: CustomEvent<IKernelPluginState>) => {
-        console.log("kernel-plugin-state-change", detail);
-        switch (detail.code) {
-            case 2: { // running
-                const params = ["param 1", "param 2"];
-                await this.kernel.rpc.notify["echo-notify"](...params);
-
-                const result = await this.kernel.rpc.call.echo(...params);
-                console.group("JSON RPC client -> kernel: call [echo] method");
-                console.log("params:", params);
-                console.log("result:", result);
-                console.groupEnd();
-
-                const request: IKernelPluginRpcCall[] = [
-                    { // call with custom id
-                        id: 0,
-                        method: "echo",
-                        params: {key1: "value1"},
-                    },
-                    { // call with auto-generated id
-                        method: "echo",
-                        params: ["key2", "value2"],
-                    },
-                    { // notify will not have response and id
-                        method: "echo-notify",
-                        params: {key3: "value3"},
-                        notification: true,
-                    },
-                    { // notify will remove id even if it is set
-                        id: "3",
-                        method: "echo-notify",
-                        params: ["key4", "value4"],
-                        notification: true,
-                    },
-                ];
-                const response = await this.kernel.rpc.batch(...request);
-                console.group("JSON RPC client -> kernel: batch call [echo] and [notify] method");
-                console.log("request:", request);
-                console.log("response:", response);
-                console.groupEnd();
-                break;
-            }
+    private stopPolling() {
+        if (this.pollTimer !== null) {
+            clearInterval(this.pollTimer);
+            this.pollTimer = null;
         }
-    };
+        this.firstPollComplete = false;
+    }
 
-    private onKernelPluginUnload = async (...params: any[]) => {
-        console.group("JSON RPC kernel -> client: unload");
-        console.log("params:", params);
-        console.groupEnd();
-    };
+    private restartPolling() {
+        this.knownCaseRecords.clear();
+        this.knownExecRecords.clear();
+        this.execFieldCache = null;
+        this.cachedExecDBID = "";
+        this.firstPollComplete = false;
+        this.startPolling();
+    }
 
-    private onKernelPluginNotify = async (...params: any[]) => {
-        console.group("JSON RPC kernel -> client: notify");
-        console.log("params:", params);
-        console.groupEnd();
-    };
+    // ── 轮询主逻辑 ──────────────────────────────────────────────────────────
 
-    private blockIconEvent({detail}: any) {
-        detail.menu.addItem({
-            id: "pluginSample_removeSpace",
-            iconHTML: "",
-            label: this.i18n.removeSpace,
-            click: () => {
-                const doOperations: IOperation[] = [];
-                detail.blockElements.forEach((item: HTMLElement) => {
-                    const editElement = item.querySelector('[contenteditable="true"]');
-                    if (editElement) {
-                        editElement.textContent = editElement.textContent.replace(/ /g, "");
-                        doOperations.push({
-                            id: item.dataset.nodeId,
-                            data: item.outerHTML,
-                            action: "update",
-                        });
+    private async poll() {
+        console.log("CaseMate poll tick, caseDBID=", this.config.caseDBID, "execDBID=", this.config.execDBID);
+        if (!this.config.caseDBID && !this.config.execDBID) return;
+
+        if (this.config.caseDBID) {
+            await this.pollCaseDatabase();
+        }
+        if (this.config.execDBID) {
+            await this.pollExecutionDatabase();
+        }
+        this.firstPollComplete = true;
+    }
+
+    // ── 渲染数据库视图（通用方法） ──────────────────────────────────────────
+
+    private async renderAV(avID: string): Promise<RenderViewResponse> {
+        try {
+            const data: any = await fetchPostAsync("/api/av/renderAttributeView", {
+                id: avID,
+                page: 1,
+                pageSize: 9999,
+                createIfNotExist: true,
+            });
+            if (!data || !data.view) {
+                console.warn("CaseMate renderAV: 返回结构异常", JSON.stringify(data).substring(0, 200));
+                return { id: avID, name: "", viewType: "", viewID: "", view: { columns: [], rows: [], rowCount: 0 } };
+            }
+            return data as RenderViewResponse;
+        } catch (e: any) {
+            console.warn("CaseMate renderAV error:", e.message || e);
+            return { id: avID, name: "", viewType: "", viewID: "", view: { columns: [], rows: [], rowCount: 0 } };
+        }
+    }
+
+    /** 使用 getAttributeView 获取数据库的原始 itemID 列表（不依赖视图渲染） */
+    private async getAVItemIDs(avID: string): Promise<string[]> {
+        try {
+            const data: any = await fetchPostAsync("/api/av/getAttributeView", {
+                id: avID,
+            });
+            const views = data?.av?.views;
+            if (views && views.length > 0) {
+                // 使用第一个视图的 itemIds
+                const ids = views[0].itemIds;
+                console.log("CaseMate getAVItemIDs:", ids?.length || 0, "items");
+                return ids || [];
+            }
+            console.warn("CaseMate getAVItemIDs: 无视图", JSON.stringify(data).substring(0, 100));
+            return [];
+        } catch (e: any) {
+            console.warn("CaseMate getAVItemIDs error:", e.message || e);
+            return [];
+        }
+    }
+
+    // ── 获取数据库原始定义（用于获取字段信息） ──────────────────────────────
+
+    private async getAVFieldDefs(avID: string): Promise<FieldDef[]> {
+        // 使用 renderAttributeView 的 columns 即可获得字段信息
+        const resp = await this.renderAV(avID);
+        return resp.view?.columns || [];
+    }
+
+    // ── 获取执行库的字段映射（带缓存） ──────────────────────────────────────
+
+    private async getExecFieldMap(): Promise<Record<string, string>> {
+        if (this.execFieldCache && this.cachedExecDBID === this.config.execDBID) {
+            return this.execFieldCache;
+        }
+        const fields = await this.getAVFieldDefs(this.config.execDBID);
+        this.execFieldCache = buildFieldMap(fields);
+        this.cachedExecDBID = this.config.execDBID;
+        return this.execFieldCache;
+    }
+
+    // ── 检测用例文档库 ──────────────────────────────────────────────────────
+
+    private async pollCaseDatabase() {
+        console.log("CaseMate pollCaseDatabase start");
+        try {
+            const resp = await this.renderAV(this.config.caseDBID);
+            console.log("CaseMate pollCaseDatabase: got", resp.view?.rows?.length || 0, "rows");
+            const columns = resp.view?.columns || [];
+            const rows = resp.view?.rows || [];
+
+            // 找到主键（block类型）字段
+            const pkField = findPrimaryKeyField(columns);
+            if (!pkField) {
+                console.warn("CaseMate: 用例文档库缺少 block 类型的主键字段");
+                console.log("CaseMate: columns=", JSON.stringify(columns.map(c => ({name: c.name, type: c.type}))));
+                return;
+            }
+            // 找出主键字段在 columns 数组中的索引（用于适配 cells 为数组的情况）
+            const pkIndex = columns.findIndex(c => c.id === pkField.id);
+
+            for (const row of rows) {
+                let blockID: string | undefined;
+
+                // 尝试按字段ID获取（cells 是对象）
+                const cellById = row.cells[pkField.id];
+                if (cellById) {
+                    blockID = getCellBlockID(cellById);
+                }
+
+                // 尝试按列索引获取（cells 是数组）
+                if (!blockID && pkIndex >= 0) {
+                    const cellByIndex = row.cells[String(pkIndex)];
+                    if (cellByIndex) {
+                        blockID = getCellBlockID(cellByIndex);
                     }
-                });
-                detail.protyle.getInstance().transaction(doOperations);
-            },
-        });
-    }
+                    // 也尝试数字索引
+                    if (!blockID) {
+                        const cellByNumIdx = row.cells[pkIndex];
+                        if (cellByNumIdx) {
+                            blockID = getCellBlockID(cellByNumIdx);
+                        }
+                    }
+                }
 
-    private showDialog() {
-        const dialog = new Dialog({
-            title: `SiYuan ${Constants.SIYUAN_VERSION}`,
-            content: `<div class="b3-dialog__content">
-    <div>appId:</div>
-    <div class="fn__hr"></div>
-    <div class="plugin-sample__time">${this.app.appId}</div>
-    <div class="fn__hr"></div>
-    <div class="fn__hr"></div>
-    <div>API demo:</div>
-    <div class="fn__hr"></div>
-    <div class="plugin-sample__time">System current time: <span id="time"></span></div>
-    <div class="fn__hr"></div>
-    <div class="fn__hr"></div>
-    <div>Protyle demo:</div>
-    <div class="fn__hr"></div>
-    <div id="protyle" style="height: 360px;"></div>
-</div>`,
-            width: this.isMobile ? "92vw" : "560px",
-            height: "540px",
-        });
-        new Protyle(this.app, dialog.element.querySelector("#protyle"), {
-            blockId: this.getEditor().protyle.block.rootID,
-        });
-        fetchPost("/api/system/currentTime", {}, (response) => {
-            dialog.element.querySelector("#time").innerHTML = new Date(response.data).toString();
-        });
-    }
+                console.log("CaseMate: row id=", row.id, "blockID=", blockID, "cells keys=", Object.keys(row.cells));
+                if (!blockID) continue;
 
-    private addMenu(rect?: DOMRect) {
-        const menu = new Menu("topBarSample", () => {
-            console.log(this.i18n.byeMenu);
-        });
-        menu.addItem({
-            icon: "iconSettings",
-            label: "Open Setting",
-            click: () => {
-                openSetting(this.app);
-            },
-        });
-        menu.addItem({
-            icon: "iconDrag",
-            label: "Open Attribute Panel",
-            click: () => {
-                openAttributePanel({
-                    nodeElement: this.getEditor().protyle.wysiwyg.element.firstElementChild as HTMLElement,
-                    protyle: this.getEditor().protyle,
-                    focusName: "custom",
-                });
-            },
-        });
-        menu.addItem({
-            icon: "iconInfo",
-            label: "Dialog(open doc first)",
-            accelerator: this.commands[0].customHotkey,
-            click: () => {
-                this.showDialog();
-            },
-        });
-        menu.addItem({
-            icon: "iconFocus",
-            label: "Select Opened Doc(open doc first)",
-            click: () => {
-                (getModelByDockType("file") as Files).selectItem(
-                    this.getEditor().protyle.notebookId,
-                    this.getEditor().protyle.path,
-                );
-            },
-        });
-        if (!this.isMobile) {
-            menu.addItem({
-                icon: "iconFace",
-                label: "Open Custom Tab",
-                click: () => {
-                    const tab = openTab({
-                        app: this.app,
-                        custom: {
-                            icon: "iconFace",
-                            title: "Custom Tab",
-                            data: {
-                                text: platformUtils.isHuawei() ? "Hello, Huawei!" : "This is my custom tab",
-                            },
-                            id: this.name + TAB_TYPE,
-                        },
+                if (!this.firstPollComplete) {
+                    this.knownCaseRecords.set(blockID, row.id);
+                    console.log("CaseMate: 首次轮询记录 blockID=", blockID);
+                    continue;
+                }
+
+                // 检测到新文档
+                if (!this.knownCaseRecords.has(blockID)) {
+                    console.log("CaseMate: 检测到新文档 blockID=", blockID);
+                    this.knownCaseRecords.set(blockID, row.id);
+                    this.parseDocumentAndCreateRecords(blockID).catch(err => {
+                        console.warn("CaseMate parse error for", blockID, err);
                     });
-                    console.log(tab);
-                },
-            });
-            menu.addItem({
-                icon: "iconImage",
-                label: "Open Asset Tab(First open the Chinese help document)",
-                click: () => {
-                    const tab = openTab({
-                        app: this.app,
-                        asset: {
-                            path: "assets/paragraph-20210512165953-ag1nib4.svg",
-                        },
-                    });
-                    console.log(tab);
-                },
-            });
-            menu.addItem({
-                icon: "iconFile",
-                label: "Open Doc Tab(open doc first)",
-                click: async () => {
-                    const tab = await openTab({
-                        app: this.app,
-                        doc: {
-                            id: this.getEditor().protyle.block.rootID,
-                        },
-                    });
-                    console.log(tab);
-                },
-            });
-            menu.addItem({
-                icon: "iconSearch",
-                label: "Open Search Tab",
-                click: () => {
-                    const tab = openTab({
-                        app: this.app,
-                        search: {
-                            k: "SiYuan",
-                        },
-                    });
-                    console.log(tab);
-                },
-            });
-            menu.addItem({
-                icon: "iconRiffCard",
-                label: "Open Card Tab",
-                click: () => {
-                    const tab = openTab({
-                        app: this.app,
-                        card: {
-                            type: "all",
-                        },
-                    });
-                    console.log(tab);
-                },
-            });
-            menu.addItem({
-                icon: "iconLayout",
-                label: "Open Float Layer(open doc first)",
-                click: () => {
-                    this.addFloatLayer({
-                        refDefs: [{refID: this.getEditor().protyle.block.rootID}],
-                        x: window.innerWidth - 768 - 120,
-                        y: 32,
-                        isBacklink: false,
-                    });
-                },
-            });
-            menu.addItem({
-                icon: "iconOpenWindow",
-                label: "Open Doc Window(open doc first)",
-                click: () => {
-                    openWindow({
-                        doc: {id: this.getEditor().protyle.block.rootID},
-                    });
-                },
-            });
-        } else {
-            menu.addItem({
-                icon: "iconFile",
-                label: "Open Doc(open doc first)",
-                click: () => {
-                    openMobileFileById(this.app, this.getEditor().protyle.block.rootID);
-                },
-            });
-        }
-        menu.addItem({
-            icon: "iconLock",
-            label: "Lockscreen",
-            click: () => {
-                lockScreen(this.app);
-            },
-        });
-        menu.addItem({
-            icon: "iconQuit",
-            label: "Exit Application",
-            click: () => {
-                exitSiYuan();
-            },
-        });
-        menu.addItem({
-            icon: "iconDownload",
-            label: "Save Layout",
-            click: () => {
-                saveLayout(() => {
-                    showMessage("Layout saved");
-                });
-            },
-        });
-        menu.addItem({
-            icon: "iconScrollHoriz",
-            label: "Event Bus",
-            type: "submenu",
-            submenu: [{
-                icon: "iconSelect",
-                label: "On ws-main",
-                click: () => {
-                    this.eventBus.on("ws-main", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off ws-main",
-                click: () => {
-                    this.eventBus.off("ws-main", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On click-blockicon",
-                click: () => {
-                    this.eventBus.on("click-blockicon", this.blockIconEventBindThis);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off click-blockicon",
-                click: () => {
-                    this.eventBus.off("click-blockicon", this.blockIconEventBindThis);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On click-pdf",
-                click: () => {
-                    this.eventBus.on("click-pdf", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off click-pdf",
-                click: () => {
-                    this.eventBus.off("click-pdf", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On click-editorcontent",
-                click: () => {
-                    this.eventBus.on("click-editorcontent", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off click-editorcontent",
-                click: () => {
-                    this.eventBus.off("click-editorcontent", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On click-editortitleicon",
-                click: () => {
-                    this.eventBus.on("click-editortitleicon", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off click-editortitleicon",
-                click: () => {
-                    this.eventBus.off("click-editortitleicon", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On click-flashcard-action",
-                click: () => {
-                    this.eventBus.on("click-flashcard-action", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off click-flashcard-action",
-                click: () => {
-                    this.eventBus.off("click-flashcard-action", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-noneditableblock",
-                click: () => {
-                    this.eventBus.on("open-noneditableblock", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-noneditableblock",
-                click: () => {
-                    this.eventBus.off("open-noneditableblock", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On loaded-protyle-static",
-                click: () => {
-                    this.eventBus.on("loaded-protyle-static", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off loaded-protyle-static",
-                click: () => {
-                    this.eventBus.off("loaded-protyle-static", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On loaded-protyle-dynamic",
-                click: () => {
-                    this.eventBus.on("loaded-protyle-dynamic", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off loaded-protyle-dynamic",
-                click: () => {
-                    this.eventBus.off("loaded-protyle-dynamic", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On switch-protyle",
-                click: () => {
-                    this.eventBus.on("switch-protyle", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off switch-protyle",
-                click: () => {
-                    this.eventBus.off("switch-protyle", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On destroy-protyle",
-                click: () => {
-                    this.eventBus.on("destroy-protyle", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off destroy-protyle",
-                click: () => {
-                    this.eventBus.off("destroy-protyle", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-doctree",
-                click: () => {
-                    this.eventBus.on("open-menu-doctree", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-doctree",
-                click: () => {
-                    this.eventBus.off("open-menu-doctree", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-blockref",
-                click: () => {
-                    this.eventBus.on("open-menu-blockref", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-blockref",
-                click: () => {
-                    this.eventBus.off("open-menu-blockref", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-fileannotationref",
-                click: () => {
-                    this.eventBus.on("open-menu-fileannotationref", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-fileannotationref",
-                click: () => {
-                    this.eventBus.off("open-menu-fileannotationref", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-tag",
-                click: () => {
-                    this.eventBus.on("open-menu-tag", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-tag",
-                click: () => {
-                    this.eventBus.off("open-menu-tag", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-link",
-                click: () => {
-                    this.eventBus.on("open-menu-link", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-link",
-                click: () => {
-                    this.eventBus.off("open-menu-link", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-image",
-                click: () => {
-                    this.eventBus.on("open-menu-image", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-image",
-                click: () => {
-                    this.eventBus.off("open-menu-image", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-av",
-                click: () => {
-                    this.eventBus.on("open-menu-av", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-av",
-                click: () => {
-                    this.eventBus.off("open-menu-av", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-content",
-                click: () => {
-                    this.eventBus.on("open-menu-content", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-content",
-                click: () => {
-                    this.eventBus.off("open-menu-content", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-breadcrumbmore",
-                click: () => {
-                    this.eventBus.on("open-menu-breadcrumbmore", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-breadcrumbmore",
-                click: () => {
-                    this.eventBus.off("open-menu-breadcrumbmore", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-inbox",
-                click: () => {
-                    this.eventBus.on("open-menu-inbox", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-inbox",
-                click: () => {
-                    this.eventBus.off("open-menu-inbox", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On input-search",
-                click: () => {
-                    this.eventBus.on("input-search", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off input-search",
-                click: () => {
-                    this.eventBus.off("input-search", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On paste",
-                click: () => {
-                    this.eventBus.on("paste", this.eventBusPaste);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off paste",
-                click: () => {
-                    this.eventBus.off("paste", this.eventBusPaste);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-siyuan-url-plugin",
-                click: () => {
-                    this.eventBus.on("open-siyuan-url-plugin", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-siyuan-url-plugin",
-                click: () => {
-                    this.eventBus.off("open-siyuan-url-plugin", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-siyuan-url-block",
-                click: () => {
-                    this.eventBus.on("open-siyuan-url-block", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-siyuan-url-block",
-                click: () => {
-                    this.eventBus.off("open-siyuan-url-block", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On opened-notebook",
-                click: () => {
-                    this.eventBus.on("opened-notebook", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off opened-notebook",
-                click: () => {
-                    this.eventBus.off("opened-notebook", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On closed-notebook",
-                click: () => {
-                    this.eventBus.on("closed-notebook", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off closed-notebook",
-                click: () => {
-                    this.eventBus.off("closed-notebook", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On kernel-plugin-state-change",
-                click: () => {
-                    this.eventBus.on("kernel-plugin-state-change", this.onKernelPluginStateChange);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off kernel-plugin-state-change",
-                click: () => {
-                    this.eventBus.off("kernel-plugin-state-change", this.onKernelPluginStateChange);
-                },
-            }],
-        });
-        menu.addSeparator();
-        menu.addItem({
-            icon: "iconSparkles",
-            label: this.data[STORAGE_NAME].readonlyText || "Readonly",
-            type: "readonly",
-        });
-        if (this.isMobile) {
-            menu.fullscreen();
-        } else {
-            menu.open({
-                x: rect.right,
-                y: rect.bottom,
-                isLeft: true,
-            });
+                } else {
+                    console.log("CaseMate: 已知文档, 跳过 blockID=", blockID);
+                }
+            }
+        } catch (e: any) {
+            console.warn("CaseMate pollCaseDatabase error:", e.message || e);
         }
     }
 
-    private getEditor() {
-        const editors = getAllEditor();
-        if (editors.length === 0) {
-            showMessage("please open doc first");
+    /** 使用 getAttributeView 检查文档是否已在执行库中存在 */
+    private async docExistsInExecDB(blockID: string): Promise<boolean> {
+        try {
+            const rawData: any = await fetchPostAsync("/api/av/getAttributeView", {
+                id: this.config.execDBID,
+            });
+            const keyValues: any[] = rawData?.av?.keyValues || [];
+            // 找到 block 类型（主键）字段
+            for (const kv of keyValues) {
+                if (kv.key?.type === "block") {
+                    for (const v of (kv.values || [])) {
+                        if (v.block?.id === blockID) return true;
+                    }
+                }
+            }
+        } catch (_) { /* ignore */ }
+        return false;
+    }
+
+    /** 获取项目名称 — 通过 hPath 取父文档名称，根文档则取自身 */
+    private async getParentDocName(blockID: string): Promise<string> {
+        try {
+            const hPath: string = await fetchPostAsync("/api/filetree/getHPathByID", { id: blockID });
+            console.log("CaseMate: hPath =", hPath);
+            const segments = hPath.split("/").filter(Boolean);
+            if (segments.length >= 2) {
+                // segments[len-1] = 当前文档, segments[len-2] = 父文档
+                return segments[segments.length - 2];
+            }
+            // hPath 不正常时返回空
+            return "";
+        } catch (e: any) {
+            console.warn("CaseMate: getParentDocName error:", e.message || e);
+            return "";
+        }
+    }
+
+    // ── 解析文档并创建执行记录 ─────────────────────────────────────────────
+
+    private async parseDocumentAndCreateRecords(blockID: string) {
+        if (!this.config.execDBID) {
+            showMessage(this.i18n.needConfig);
             return;
         }
-        return editors[0];
+
+        // 1. 读取文档内容
+        let kramdownResp: any;
+        try {
+            kramdownResp = await fetchPostAsync("/api/block/getBlockKramdown", { id: blockID });
+            console.log("CaseMate: getBlockKramdown resp:", JSON.stringify(kramdownResp));
+        } catch (e: any) {
+            showMessage(`读取文档失败: ${e.message || e}`);
+            return;
+        }
+        const kramdown: string = kramdownResp?.kramdown || kramdownResp?.content || "";
+        if (!kramdown) {
+            console.log("CaseMate: kramdown为空, resp=", kramdownResp);
+            return;
+        }
+
+        // 2. 解析用例
+        const excludeList = this.config.excludeKeywords
+            .split(",").map(s => s.trim()).filter(s => s.length > 0);
+
+        const cases = extractTestCases(kramdown, excludeList);
+        if (cases.length === 0) {
+            showMessage(this.i18n.parseEmpty);
+            return;
+        }
+
+        // 3. 获取执行库字段映射
+        let fieldMap: Record<string, string>;
+        try {
+            fieldMap = await this.getExecFieldMap();
+        } catch (e: any) {
+            showMessage(`获取执行库字段信息失败: ${e.message || e}`);
+            return;
+        }
+
+        const projectKeyID = fieldMap[FIELD_PROJECT_NAME] || fieldMap["用例名称"];
+       const primaryField = (await this.getAVFieldDefs(this.config.execDBID))
+           .find(f => f.type === "block");
+        const primaryKeyID = primaryField?.id;
+
+        if (!primaryKeyID) {
+            showMessage("执行库缺少主键块字段，请检查数据库结构");
+            return;
+        }
+
+        // 获取父文档名称作为项目名称
+        const projectName = await this.getParentDocName(blockID);
+        console.log("CaseMate: projectName =", projectName);
+
+        // 4. 去重检查 — 如果文档已在执行库中，跳过
+        try {
+            if (await this.docExistsInExecDB(blockID)) {
+                console.log("CaseMate: 文档已在执行库中，跳过", blockID);
+                return;
+            }
+        } catch (_) { /* ignore */ }
+
+        // 5. 创建执行记录 — 两段式：先创建行，再单独设置字段
+        try {
+            // 第一步：用 getAttributeView 获取当前 itemID 基线
+            const beforeIDs = await this.getAVItemIDs(this.config.execDBID);
+            console.log("CaseMate: 创建前 item 数 =", beforeIDs.length);
+
+            // 创建仅含文本字段的行（项目名称）
+            const blocksValues: any[][] = [];
+            for (let i = 0; i < cases.length; i++) {
+                const rowVals: any[] = [];
+                // 如果有项目名称字段，填入该字段
+                if (projectKeyID) {
+                    rowVals.push({ keyID: projectKeyID, text: { content: projectName } });
+                }
+                blocksValues.push(rowVals);
+            }
+
+            console.log("CaseMate: 创建", blocksValues.length, "条记录");
+            await fetchPostAsync("/api/av/appendAttributeViewDetachedBlocksWithValues", {
+                avID: this.config.execDBID,
+                blocksValues,
+            });
+
+            // 第二步：等500ms后重新获取 itemID，找到新增的行
+            await new Promise(r => setTimeout(r, 500));
+            const afterIDs = await this.getAVItemIDs(this.config.execDBID);
+            const newIDs = afterIDs.filter(id => !beforeIDs.includes(id));
+            console.log("CaseMate: 创建后 item 数 =", afterIDs.length, "新增 =", newIDs.length);
+
+            // 第三步：为每个新行设置块引用（指向用例标题块）和状态
+            for (let i = 0; i < newIDs.length && i < cases.length; i++) {
+                const itemID = newIDs[i];
+                const c = cases[i];
+                // 设置块引用 — 指向用例标题块，不是文档根节点
+                await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
+                    avID: this.config.execDBID,
+                    keyID: primaryKeyID,
+                    itemID,
+                    value: {
+                        type: "block",
+                        block: { id: c.blockID || blockID, content: c.name },
+                    },
+                });
+                // 设置状态默认值
+                const statusKeyID = fieldMap[FIELD_STATUS];
+                if (statusKeyID) {
+                    try {
+                        const valueObj = {
+                            mSelect: [{ content: STATUS_UNTESTED }],
+                        };
+                        const result = await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
+                            avID: this.config.execDBID,
+                            keyID: statusKeyID,
+                            itemID,
+                            value: valueObj,
+                        });
+                        console.log("CaseMate: setStatus OK", JSON.stringify(result).substring(0, 100));
+                    } catch (e: any) {
+                        console.warn("CaseMate: setStatus error", e.message || e);
+                    }
+                }
+            }
+            console.log("CaseMate: 已更新", Math.min(newIDs.length, cases.length), "条记录的字段");
+
+            showMessage(
+                this.i18n.parseComplete
+                    .replace("{count}", String(cases.length))
+                    .replace("{docCount}", "1"),
+            );
+
+            this.execFieldCache = null;
+        } catch (e: any) {
+            showMessage(`创建执行记录失败: ${e.message || e}`);
+        }
+    }
+
+    // ── 检测执行库状态变化 → 自动记录时间 ──────────────────────────────────
+
+    private async pollExecutionDatabase() {
+        console.log("CaseMate pollExecutionDatabase start");
+        try {
+            const fieldMap = await this.getExecFieldMap();
+            const statusKeyID = fieldMap[FIELD_STATUS];
+            const dateKeyID = fieldMap[FIELD_EXEC_DATE];
+
+            if (!statusKeyID) return;
+
+            // 使用 getAttributeView 读取原始数据（而不是 renderAttributeView）
+            const rawData: any = await fetchPostAsync("/api/av/getAttributeView", {
+                id: this.config.execDBID,
+            });
+            const keyValues: any[] = rawData?.av?.keyValues || [];
+            const itemIDs: string[] = rawData?.av?.views?.[0]?.itemIds || [];
+
+            // 构建 per-item 的数据：{ itemID: { status, date } }
+            const itemData: Record<string, { status: string; date: string }> = {};
+
+            // 状态字段：从 keyValues 中找到状态字段的所有 values
+            const statusKV = keyValues.find((kv: any) => kv.key?.id === statusKeyID);
+            if (statusKV) {
+                for (const v of (statusKV.values || [])) {
+                    const itemID = v.blockID;
+                    const statusText = v.mSelect?.[0]?.content || "";
+                    if (!itemData[itemID]) itemData[itemID] = { status: "", date: "" };
+                    itemData[itemID].status = statusText;
+                }
+            }
+
+            // 日期字段
+            if (dateKeyID) {
+                const dateKV = keyValues.find((kv: any) => kv.key?.id === dateKeyID);
+                if (dateKV) {
+                    for (const v of (dateKV.values || [])) {
+                        const itemID = v.blockID;
+                        const dateContent = v.date?.content;
+                        const dateStr = dateContent ? String(dateContent) : "";
+                        if (!itemData[itemID]) itemData[itemID] = { status: "", date: "" };
+                        itemData[itemID].date = dateStr;
+                    }
+                }
+            }
+
+            // 按 itemIDs 顺序处理，保证一致性
+            for (const itemID of itemIDs) {
+                const data = itemData[itemID];
+                if (!data) continue;
+                const currStatus = data.status;
+                const currDate = data.date;
+
+                if (!this.firstPollComplete) {
+                    this.knownExecRecords.set(itemID, { status: currStatus, execDate: currDate });
+                    continue;
+                }
+
+                const prev = this.knownExecRecords.get(itemID);
+                if (!prev) {
+                    this.knownExecRecords.set(itemID, { status: currStatus, execDate: currDate });
+                    continue;
+                }
+
+                // 检测状态变化 → 自动记录时间
+                if (prev.status !== currStatus) {
+                    if ((currStatus === STATUS_PASSED || currStatus === STATUS_NEEDS_FIX) &&
+                        this.config.autoRecordTime && dateKeyID) {
+                        try {
+                            const now = Date.now();
+                            await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
+                                avID: this.config.execDBID,
+                                keyID: dateKeyID,
+                                itemID,
+                                value: {
+                                    date: { content: now, isNotEmpty: true },
+                                },
+                            });
+                            console.log("CaseMate: auto-recorded time for", itemID);
+                        } catch (e: any) {
+                            console.warn("CaseMate update time error:", e.message || e);
+                        }
+                        this.knownExecRecords.set(itemID, { status: currStatus, execDate: String(Date.now()) });
+                        continue;
+
+                    } else if (currStatus === STATUS_UNTESTED && this.config.clearTimeOnReset && dateKeyID) {
+                        try {
+                            await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
+                                avID: this.config.execDBID,
+                                keyID: dateKeyID,
+                                itemID,
+                                value: {
+                                    date: { content: null, isNotEmpty: false },
+                                },
+                            });
+                        } catch (e: any) {
+                            console.warn("CaseMate clear time error:", e.message || e);
+                        }
+                        this.knownExecRecords.set(itemID, { status: currStatus, execDate: "" });
+                        continue;
+                    }
+                }
+
+                this.knownExecRecords.set(itemID, { status: currStatus, execDate: currDate });
+            }
+        } catch (e: any) {
+            console.warn("CaseMate pollExecutionDatabase error:", e.message || e);
+        }
+    }
+
+    // ── 右键菜单：解析为用例（兜底方案） ────────────────────────────────────
+
+    private onDocTreeMenu(event: any) {
+        const detail = event.detail;
+        if (!detail || !detail.menu) return;
+        console.log("CaseMate open-menu-doctree detail keys:", Object.keys(detail));
+        console.log("CaseMate open-menu-doctree detail.menu:", detail.menu);
+
+        detail.menu.addItem({
+            id: "caseMate_parseToCases",
+            iconHTML: "",
+            label: this.i18n.parseToCases,
+            click: async () => {
+                // 多种策略获取文档块 ID
+                let blockID: string | undefined;
+
+                // 策略1: detail.elements（open-menu-doctree 事件提供）
+                if (!blockID && detail.elements?.length > 0) {
+                    console.log("CaseMate: trying strategy 1 - detail.elements");
+                    for (const el of detail.elements) {
+                        blockID = el.dataset?.nodeId || el.dataset?.nodeid;
+                        if (blockID) break;
+                    }
+                }
+
+                // 策略2: detail.blockElements
+                if (!blockID && detail.blockElements?.length > 0) {
+                    console.log("CaseMate: trying strategy 2 - blockElements");
+                    for (const el of detail.blockElements) {
+                        blockID = el.dataset?.nodeId || el.dataset?.nodeid;
+                        if (blockID) break;
+                    }
+                }
+
+                // 策略3: detail.element
+                if (!blockID && detail.element) {
+                    console.log("CaseMate: trying strategy 3 - detail.element");
+                    let el = detail.element;
+                    while (el) {
+                        blockID = el.dataset?.nodeId || el.dataset?.nodeid;
+                        if (blockID) break;
+                        el = el.parentElement;
+                    }
+                }
+
+                // 策略4: detail.menu.element
+                if (!blockID && detail.menu?.element) {
+                    console.log("CaseMate: trying strategy 4 - menu.element");
+                    let el = detail.menu.element;
+                    while (el) {
+                        blockID = el.dataset?.nodeId || el.dataset?.nodeid;
+                        if (blockID) break;
+                        el = el.parentElement;
+                    }
+                }
+
+                // 策略5: 事件目标自身
+                if (!blockID) {
+                    console.log("CaseMate: trying strategy 5 - event target");
+                    let el = event.target;
+                    while (el && el !== document) {
+                        blockID = el.dataset?.nodeId || el.dataset?.nodeid;
+                        if (blockID) break;
+                        el = el.parentElement;
+                    }
+                }
+
+                console.log("CaseMate: resolved blockID =", blockID);
+
+                if (!blockID) {
+                    showMessage(this.i18n.noEditor);
+                    return;
+                }
+
+                let totalCases = 0;
+
+                // 单文档处理（右键菜单每次操作一个文档）
+                // 去重检查：如果文档已在执行库中，跳过
+                if (this.config.execDBID) {
+                    try {
+                        if (await this.docExistsInExecDB(blockID)) {
+                            console.log("CaseMate: 文档已在执行库中，跳过", blockID);
+                            showMessage(this.i18n.parseSkip.replace("{count}", "1"));
+                            return;
+                        }
+                    } catch (_) { /* ignore */ }
+                }
+
+                // 读取文档
+                let kramdownResp: any;
+                try {
+                    kramdownResp = await fetchPostAsync("/api/block/getBlockKramdown", { id: blockID });
+                    console.log("CaseMate: getBlockKramdown resp:", JSON.stringify(kramdownResp));
+                } catch (e: any) {
+                    console.warn("CaseMate: 读取文档失败", e.message || e);
+                    showMessage(`读取文档失败: ${e.message || e}`);
+                    return;
+                }
+                const kramdown: string = kramdownResp?.kramdown || kramdownResp?.content || "";
+                if (!kramdown) {
+                    console.log("CaseMate: kramdown为空, resp=", kramdownResp);
+                    return;
+                }
+
+                const excludeList = this.config.excludeKeywords
+                    .split(",").map(s => s.trim()).filter(s => s.length > 0);
+
+                const cases = extractTestCases(kramdown, excludeList);
+                console.log("CaseMate: 解析出用例数 =", cases.length);
+                if (cases.length === 0) {
+                    showMessage(this.i18n.parseEmpty);
+                    return;
+                }
+
+                // 创建执行记录
+                if (this.config.execDBID) {
+                    try {
+                        const fieldMap = await this.getExecFieldMap();
+                        console.log("CaseMate: exec field map =", JSON.stringify(fieldMap));
+                        const projectKeyID = fieldMap[FIELD_PROJECT_NAME] || fieldMap["用例名称"];
+                        const fields = await this.getAVFieldDefs(this.config.execDBID);
+                        const pkField = findPrimaryKeyField(fields);
+
+                        if (!pkField) {
+                            showMessage("执行库缺少主键块字段");
+                            return;
+                        }
+
+                        // 获取父文档名称作为项目名称
+                        const projectName = await this.getParentDocName(blockID);
+                        console.log("CaseMate: projectName =", projectName);
+
+                        // 两段式创建：先创建含项目名称的行
+                        const beforeIDs = await this.getAVItemIDs(this.config.execDBID);
+                        console.log("CaseMate: 创建前 item 数 =", beforeIDs.length);
+
+                        const blocksValues: any[][] = [];
+                        for (let i = 0; i < cases.length; i++) {
+                            const rowVals: any[] = [];
+                            if (projectKeyID) {
+                                rowVals.push({ keyID: projectKeyID, text: { content: projectName } });
+                            }
+                            blocksValues.push(rowVals);
+                        }
+                        console.log("CaseMate: 创建", blocksValues.length, "条记录");
+
+                        await fetchPostAsync("/api/av/appendAttributeViewDetachedBlocksWithValues", {
+                            avID: this.config.execDBID,
+                            blocksValues,
+                        });
+
+                        // 等500ms后重新获取 itemID
+                        await new Promise(r => setTimeout(r, 500));
+                        const afterIDs = await this.getAVItemIDs(this.config.execDBID);
+                        const newIDs = afterIDs.filter(id => !beforeIDs.includes(id));
+                        console.log("CaseMate: 创建后 item 数 =", afterIDs.length, "新增 =", newIDs.length);
+
+                        // 为每个新行设置块引用和状态
+                        for (let i = 0; i < newIDs.length && i < cases.length; i++) {
+                            const itemID = newIDs[i];
+                            const c = cases[i];
+                            // 设置块引用（主键）— 指向用例标题块
+                            await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
+                                avID: this.config.execDBID,
+                                keyID: pkField.id,
+                                itemID,
+                                value: {
+                                    type: "block",
+                                    block: { id: c.blockID || blockID, content: c.name },
+                                },
+                            });
+                            // 设置状态默认值
+                            const statusKeyID = fieldMap[FIELD_STATUS];
+                            if (statusKeyID) {
+                                try {
+                                    const result = await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
+                                        avID: this.config.execDBID,
+                                        keyID: statusKeyID,
+                                        itemID,
+                                        value: {
+                                            mSelect: [{ content: STATUS_UNTESTED }],
+                                        },
+                                    });
+                                    console.log("CaseMate: setStatus OK", JSON.stringify(result).substring(0, 100));
+                                } catch (e: any) {
+                                    console.warn("CaseMate: setStatus error", e.message || e);
+                                }
+                            }
+                        }
+                        console.log("CaseMate: 已更新", Math.min(newIDs.length, cases.length), "条记录的字段");
+                        totalCases += Math.min(newIDs.length, cases.length);
+                        this.execFieldCache = null;
+                    } catch (e: any) {
+                        console.warn("CaseMate batch create error:", e.message || e);
+                        showMessage(`创建执行记录失败: ${e.message || e}`);
+                        return;
+                    }
+                }
+
+                const msg = this.i18n.parseComplete
+                    .replace("{count}", String(totalCases))
+                    .replace("{docCount}", "1");
+                showMessage(msg);
+                this.restartPolling();
+            },
+        });
     }
 }
