@@ -140,7 +140,8 @@
 ### Step 5: Statistics
 - Right-click the Execution Library → "Data Statistics"
 - Choose the filter column (default: case name), enter filter values
-- Optionally enable **regex matching** (e.g. `^1\.(9|1[0-3])\.` to match cases 1.9 ~ 1.13)
+- **Smart matching** (no regex needed): `1.9` prefix match, `1.9~1.13` range match, `*登录*` wildcard, `登录` contains match
+- Advanced users can enable **regex matching** (e.g. `^1\.(9|1[0-3])\.` to match cases 1.9 ~ 1.13)
 - Choose the group dimension (status, project name, etc.) — all distinct values are counted automatically
 
 ## Development
@@ -169,3 +170,7 @@ pnpm run lint
 ### v0.1.1
 - Data statistics: filter by column + keywords or regex, group by any field, dynamic status grouping
 - Statistics dialog with field dropdown (no manual typing)
+
+### v0.1.2
+- Smart matching for statistics: prefix match (`1.9`), range match (`1.9~1.13`), wildcard (`*登录*`), contains match — no regex knowledge needed
+- Regex mode kept as an advanced option

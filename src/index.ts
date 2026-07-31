@@ -1022,7 +1022,7 @@ export default class CaseMatePlugin extends Plugin {
     </div>
     <div style="margin-bottom:12px;">
         <label style="font-weight:500;display:block;margin-bottom:4px;">过滤条件（多个用逗号分隔）</label>
-        <textarea id="cmStatFilter" class="b3-text-field fn__block" rows="3" placeholder="例如：1.9,1.10,1.11 或正则 1\\.(9|10|11)\\.*"></textarea>
+        <textarea id="cmStatFilter" class="b3-text-field fn__block" rows="3" placeholder="例如：1.9,1.9~1.13,*登录*"></textarea>
     </div>
     <div style="margin-bottom:12px;">
         <label style="font-weight:500;display:block;margin-bottom:4px;">分组维度</label>
@@ -1030,10 +1030,14 @@ export default class CaseMatePlugin extends Plugin {
     </div>
     <div style="margin-bottom:4px;display:flex;align-items:center;gap:8px;">
         <input type="checkbox" id="cmStatRegex" style="width:16px;height:16px;">
-        <label for="cmStatRegex" style="font-size:13px;">使用正则表达式匹配</label>
+        <label for="cmStatRegex" style="font-size:13px;">使用正则表达式匹配（高级）</label>
     </div>
-    <div style="margin-bottom:4px;color:var(--b3-theme-on-surface-light);font-size:12px;">
-        未勾选：字段值包含任意过滤条件即匹配；勾选后：按正则表达式匹配
+    <div style="margin-bottom:4px;color:var(--b3-theme-on-surface-light);font-size:12px;line-height:1.6;">
+        智能匹配规则：<br>
+        · 输入 <b>1.9</b> → 匹配所有 1.9 开头的用例<br>
+        · 输入 <b>1.9~1.13</b> 或 <b>1.9-1.13</b> → 匹配序号范围<br>
+        · 输入 <b>*登录*</b> → 通配符（* 匹配任意字符）<br>
+        · 输入 <b>登录</b> → 名称中包含"登录"
     </div>
 </div>
 <div class="b3-dialog__action">
@@ -1124,8 +1128,8 @@ export default class CaseMatePlugin extends Plugin {
                     // 正则模式：任一正则匹配即可
                     match = regexes.some(re => re.test(val));
                 } else {
-                    // 包含模式：字段值包含任一过滤条件
-                    match = filterValues.some(fv => val.includes(fv));
+                    // 智能匹配模式：任一条件匹配即可（前缀/范围/通配符/包含）
+                    match = filterValues.some(fv => matchSmart(val, fv));
                 }
                 if (match) {
                     total++;
@@ -1144,7 +1148,7 @@ export default class CaseMatePlugin extends Plugin {
             if (total === 0) {
                 resultDiv.innerHTML = "<div style=\"padding:8px 0;color:var(--b3-theme-on-surface-light);\">未找到匹配的用例</div>";
             } else {
-                const modeText = useRegex ? "正则匹配" : "包含";
+                const modeText = useRegex ? "正则匹配" : "智能匹配";
                 let html = `<div style="padding:8px 0;font-weight:500;">查询条件：${column} ${modeText} ${filterValues.join("、")}</div>`;
                 html += `<div style="padding:4px 0;">总计：${total} 条</div>`;
                 html += "<table style=\"width:100%;border-collapse:collapse;margin-top:8px;\">";
@@ -1180,4 +1184,65 @@ function getFieldText(v: any): string {
     if (v.number?.content !== undefined) return String(v.number.content);
     if (v.date?.content) return String(v.date.content);
     return "";
+}
+
+// ── 智能匹配 ────────────────────────────────────────────────────────────────
+
+/** 转义正则特殊字符 */
+function escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 解析序号范围："1.9~1.13" / "1.9-1.13" → ["1.9","1.10",...,"1.13"] */
+function parseNumRange(left: string, right: string): string[] {
+    const lParts = left.split(".");
+    const rParts = right.split(".");
+    const common: string[] = [];
+    let i = 0;
+    while (i < lParts.length - 1 && i < rParts.length - 1 && lParts[i] === rParts[i]) {
+        common.push(lParts[i]);
+        i++;
+    }
+    const start = parseInt(lParts[lParts.length - 1], 10);
+    const end = parseInt(rParts[rParts.length - 1], 10);
+    if (isNaN(start) || isNaN(end) || start > end) return [];
+    const prefix = common.join(".");
+    const result: string[] = [];
+    for (let n = start; n <= end; n++) {
+        result.push(prefix ? `${prefix}.${n}` : String(n));
+    }
+    return result;
+}
+
+/**
+ * 智能匹配单个条件（用户无需懂正则）：
+ * - "1.9"      → 前缀匹配（匹配 1.9.x）
+ * - "1.9~1.13" → 序号范围（1.9 ~ 1.13）
+ * - "1.9-1.13" → 同上
+ * - "*登录*"   → 通配符（* 任意字符）
+ * - "登录"     → 包含匹配
+ */
+function matchSmart(val: string, cond: string): boolean {
+    cond = cond.trim();
+    if (!cond) return false;
+
+    // 通配符模式
+    if (cond.includes("*") || cond.includes("?")) {
+        const re = new RegExp("^" + cond.split("*").map(escapeRegex).join(".*").replace(/\?/g, ".") + "$");
+        return re.test(val);
+    }
+
+    // 序号范围：数字.数字 ~ 数字.数字
+    const rangeMatch = cond.match(/^([\d.]+)\s*(?:~|-)\s*([\d.]+)$/);
+    if (rangeMatch && /^\d+(\.\d+)*$/.test(rangeMatch[1]) && /^\d+(\.\d+)*$/.test(rangeMatch[2])) {
+        return parseNumRange(rangeMatch[1], rangeMatch[2]).some(p => val === p || val.startsWith(p + "."));
+    }
+
+    // 纯数字序号 → 前缀匹配（避免误匹配 1.9 → 1.90）
+    if (/^\d+(\.\d+)*$/.test(cond)) {
+        return val === cond || val.startsWith(cond + ".");
+    }
+
+    // 其他文本 → 包含匹配
+    return val.includes(cond);
 }
