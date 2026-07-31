@@ -137,12 +137,12 @@
 - Change status to "Passed" or "Needs Fix" → execution date is auto-filled
 - Click the primary key to jump to the specific test case in the source document
 
-### Step 5: Statistics
-- Right-click the Execution Library → "Data Statistics"
-- Choose the filter column (default: case name), enter filter values
+### Step 5: Statistics (works on any database)
+- Right-click **any database** → "Data Statistics"
+- Choose the filter column, enter filter values
 - **Smart matching** (no regex needed): `1.9` prefix match, `1.9~1.13` range match, `*登录*` wildcard, `登录` contains match
 - Advanced users can enable **regex matching** (e.g. `^1\.(9|1[0-3])\.` to match cases 1.9 ~ 1.13)
-- Choose the group dimension (status, project name, etc.) — all distinct values are counted automatically
+- Choose the group dimension — all distinct values are counted automatically
 
 ## Development
 

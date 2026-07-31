@@ -983,21 +983,28 @@ export default class CaseMatePlugin extends Plugin {
         });
     }
 
-    // ── 数据库右键菜单：数据统计 ────────────────────────────────────────────
+    // ── 数据库右键菜单：数据统计（通用，支持任意数据库） ────────────────────
 
     private onAVMenu(event: any) {
         const detail = event.detail;
         if (!detail || !detail.menu) return;
+
+        // 从右键的数据库块元素获取 avID（data-av-id 属性），支持任意数据库
+        const avID = detail.element?.getAttribute?.("data-av-id") || detail.element?.dataset?.avId || "";
 
         detail.menu.addItem({
             id: "caseMate_statistics",
             iconHTML: "",
             label: "数据统计",
             click: async () => {
-                // 读取执行库的字段列表
+                if (!avID) {
+                    showMessage("未能获取当前数据库 ID，请直接在数据库上右键");
+                    return;
+                }
+                // 读取当前数据库的字段列表
                 let fieldNames: string[] = [];
                 try {
-                    const fieldDefs = await this.getAVFieldDefs(this.config.execDBID);
+                    const fieldDefs = await this.getAVFieldDefs(avID);
                     fieldNames = fieldDefs.map(f => f.name).filter(n => n !== "主键");
                 } catch (_) { /* ignore */ }
 
@@ -1065,15 +1072,15 @@ export default class CaseMatePlugin extends Plugin {
                         return;
                     }
                     const filterValues = rawFilter.split(",").map(s => s.trim()).filter(s => s.length > 0);
-                    await this.runStatistics(column, filterValues, groupField, useRegex, resultDiv);
+                    await this.runStatistics(avID, column, filterValues, groupField, useRegex, resultDiv);
                 });
             },
         });
     }
 
-    private async runStatistics(column: string, filterValues: string[], groupField: string, useRegex: boolean, resultDiv: HTMLDivElement) {
-        if (!this.config.execDBID) {
-            showMessage("请先配置测试执行库 ID");
+    private async runStatistics(avID: string, column: string, filterValues: string[], groupField: string, useRegex: boolean, resultDiv: HTMLDivElement) {
+        if (!avID) {
+            showMessage("未能获取数据库 ID");
             return;
         }
 
@@ -1089,8 +1096,8 @@ export default class CaseMatePlugin extends Plugin {
         }
 
         try {
-            // 1. 获取执行库原始数据
-            const rawData: any = await fetchPostAsync("/api/av/getAttributeView", { id: this.config.execDBID });
+            // 1. 获取数据库原始数据
+            const rawData: any = await fetchPostAsync("/api/av/getAttributeView", { id: avID });
             const keyValues: any[] = rawData?.av?.keyValues || [];
             const itemIDs: string[] = rawData?.av?.views?.[0]?.itemIds || [];
 
