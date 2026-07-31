@@ -3,6 +3,7 @@ import {
     showMessage,
     Setting,
     fetchPost,
+    Dialog,
 } from "siyuan";
 import "./index.scss";
 
@@ -203,6 +204,7 @@ export default class CaseMatePlugin extends Plugin {
             },
         });
         this.eventBus.on("open-menu-doctree", this.onDocTreeMenu.bind(this));
+        this.eventBus.on("open-menu-av", this.onAVMenu.bind(this));
         this.startPolling();
     }
 
@@ -210,6 +212,7 @@ export default class CaseMatePlugin extends Plugin {
         console.log("CaseMate onunload");
         this.stopPolling();
         this.eventBus.off("open-menu-doctree", this.onDocTreeMenu.bind(this));
+        this.eventBus.off("open-menu-av", this.onAVMenu.bind(this));
     }
 
     // ── 设置面板 ────────────────────────────────────────────────────────────
@@ -979,4 +982,202 @@ export default class CaseMatePlugin extends Plugin {
             },
         });
     }
+
+    // ── 数据库右键菜单：数据统计 ────────────────────────────────────────────
+
+    private onAVMenu(event: any) {
+        const detail = event.detail;
+        if (!detail || !detail.menu) return;
+
+        detail.menu.addItem({
+            id: "caseMate_statistics",
+            iconHTML: "",
+            label: "数据统计",
+            click: async () => {
+                // 读取执行库的字段列表
+                let fieldNames: string[] = [];
+                try {
+                    const fieldDefs = await this.getAVFieldDefs(this.config.execDBID);
+                    fieldNames = fieldDefs.map(f => f.name).filter(n => n !== "主键");
+                } catch (_) { /* ignore */ }
+
+                const defaultColumn = fieldNames.includes("用例名称") ? "用例名称" :
+                    fieldNames.includes(FIELD_PROJECT_NAME) ? FIELD_PROJECT_NAME : (fieldNames[0] || "");
+                const defaultGroup = fieldNames.includes(FIELD_STATUS) ? FIELD_STATUS : (fieldNames[0] || "");
+
+                const optionsHtml = fieldNames.map(n =>
+                    `<option value="${n}" ${n === defaultColumn ? "selected" : ""}>${n}</option>`
+                ).join("");
+                const groupOptionsHtml = fieldNames.map(n =>
+                    `<option value="${n}" ${n === defaultGroup ? "selected" : ""}>${n}</option>`
+                ).join("");
+
+                // 创建统计对话框
+                const dialog = new Dialog({
+                    title: "CaseMate 数据统计",
+                    content: `<div class="b3-dialog__content">
+    <div style="margin-bottom:12px;">
+        <label style="font-weight:500;display:block;margin-bottom:4px;">过滤列（字段名）</label>
+        <select id="cmStatColumn" class="b3-text-field fn__block">${optionsHtml}</select>
+    </div>
+    <div style="margin-bottom:12px;">
+        <label style="font-weight:500;display:block;margin-bottom:4px;">过滤条件（多个用逗号分隔）</label>
+        <textarea id="cmStatFilter" class="b3-text-field fn__block" rows="3" placeholder="例如：1.9,1.10,1.11 或正则 1\\.(9|10|11)\\.*"></textarea>
+    </div>
+    <div style="margin-bottom:12px;">
+        <label style="font-weight:500;display:block;margin-bottom:4px;">分组维度</label>
+        <select id="cmStatGroup" class="b3-text-field fn__block">${groupOptionsHtml}</select>
+    </div>
+    <div style="margin-bottom:4px;display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="cmStatRegex" style="width:16px;height:16px;">
+        <label for="cmStatRegex" style="font-size:13px;">使用正则表达式匹配</label>
+    </div>
+    <div style="margin-bottom:4px;color:var(--b3-theme-on-surface-light);font-size:12px;">
+        未勾选：字段值包含任意过滤条件即匹配；勾选后：按正则表达式匹配
+    </div>
+</div>
+<div class="b3-dialog__action">
+    <button id="cmStatCancel" class="b3-button b3-button--cancel">取消</button>
+    <button id="cmStatSubmit" class="b3-button b3-button--text">统计</button>
+</div>
+<div id="cmStatResult" style="padding:12px 16px;display:none;"></div>`,
+                    width: "520px",
+                });
+
+                const columnInput = dialog.element.querySelector("#cmStatColumn") as HTMLSelectElement;
+                const filterInput = dialog.element.querySelector("#cmStatFilter") as HTMLTextAreaElement;
+                const groupInput = dialog.element.querySelector("#cmStatGroup") as HTMLSelectElement;
+                const regexInput = dialog.element.querySelector("#cmStatRegex") as HTMLInputElement;
+                const resultDiv = dialog.element.querySelector("#cmStatResult") as HTMLDivElement;
+
+                dialog.element.querySelector("#cmStatCancel")?.addEventListener("click", () => dialog.destroy());
+                dialog.element.querySelector("#cmStatSubmit")?.addEventListener("click", async () => {
+                    const column = columnInput.value.trim();
+                    const rawFilter = filterInput.value.trim();
+                    const groupField = groupInput.value.trim();
+                    const useRegex = regexInput.checked;
+                    if (!column || !rawFilter) {
+                        showMessage("请填写过滤列和过滤条件");
+                        return;
+                    }
+                    const filterValues = rawFilter.split(",").map(s => s.trim()).filter(s => s.length > 0);
+                    await this.runStatistics(column, filterValues, groupField, useRegex, resultDiv);
+                });
+            },
+        });
+    }
+
+    private async runStatistics(column: string, filterValues: string[], groupField: string, useRegex: boolean, resultDiv: HTMLDivElement) {
+        if (!this.config.execDBID) {
+            showMessage("请先配置测试执行库 ID");
+            return;
+        }
+
+        // 预编译正则，校验合法性
+        let regexes: RegExp[] = [];
+        if (useRegex) {
+            try {
+                regexes = filterValues.map(fv => new RegExp(fv));
+            } catch (e: any) {
+                showMessage(`正则表达式无效: ${e.message || e}`);
+                return;
+            }
+        }
+
+        try {
+            // 1. 获取执行库原始数据
+            const rawData: any = await fetchPostAsync("/api/av/getAttributeView", { id: this.config.execDBID });
+            const keyValues: any[] = rawData?.av?.keyValues || [];
+            const itemIDs: string[] = rawData?.av?.views?.[0]?.itemIds || [];
+
+            // 2. 获取过滤列和分组列的 keyValue
+            const columnKV = keyValues.find((kv: any) => kv.key?.name === column);
+            const groupKV = keyValues.find((kv: any) => kv.key?.name === groupField);
+
+            if (!columnKV) {
+                showMessage(`找不到列 "${column}"，请检查列名是否正确`);
+                return;
+            }
+            if (!groupKV) {
+                showMessage(`找不到分组列 "${groupField}"`);
+                return;
+            }
+
+            // 3. 构建 itemID → 字段值 的映射
+            const columnValues: Record<string, string> = {};
+            for (const v of (columnKV.values || [])) {
+                columnValues[v.blockID] = getFieldText(v);
+            }
+
+            const groupValues: Record<string, string> = {};
+            for (const v of (groupKV.values || [])) {
+                groupValues[v.blockID] = getFieldText(v);
+            }
+
+            // 4. 筛选匹配的 item，并按分组字段分组
+            const groups: Record<string, number> = {};
+            let total = 0;
+            for (const itemID of itemIDs) {
+                const val = columnValues[itemID] || "";
+                let match: boolean;
+                if (useRegex) {
+                    // 正则模式：任一正则匹配即可
+                    match = regexes.some(re => re.test(val));
+                } else {
+                    // 包含模式：字段值包含任一过滤条件
+                    match = filterValues.some(fv => val.includes(fv));
+                }
+                if (match) {
+                    total++;
+                    const groupVal = groupValues[itemID] || "（空）";
+                    groups[groupVal] = (groups[groupVal] || 0) + 1;
+                }
+            }
+
+            // 5. 展示结果 — 动态排序：数量多的在前，空值排最后
+            const entries = Object.entries(groups).sort((a, b) => {
+                if (a[0] === "（空）") return 1;
+                if (b[0] === "（空）") return -1;
+                return b[1] - a[1];
+            });
+
+            if (total === 0) {
+                resultDiv.innerHTML = "<div style=\"padding:8px 0;color:var(--b3-theme-on-surface-light);\">未找到匹配的用例</div>";
+            } else {
+                const modeText = useRegex ? "正则匹配" : "包含";
+                let html = `<div style="padding:8px 0;font-weight:500;">查询条件：${column} ${modeText} ${filterValues.join("、")}</div>`;
+                html += `<div style="padding:4px 0;">总计：${total} 条</div>`;
+                html += "<table style=\"width:100%;border-collapse:collapse;margin-top:8px;\">";
+                html += `<tr style="border-bottom:1px solid var(--b3-theme-surface-light);">
+                    <th style="text-align:left;padding:4px 8px;">${groupField}</th>
+                    <th style="text-align:right;padding:4px 8px;">数量</th>
+                    <th style="text-align:right;padding:4px 8px;">占比</th>
+                </tr>`;
+                for (const [key, count] of entries) {
+                    const pct = ((count / total) * 100).toFixed(1);
+                    html += `<tr style="border-bottom:1px solid var(--b3-theme-surface-light);">
+                        <td style="padding:4px 8px;">${key}</td>
+                        <td style="text-align:right;padding:4px 8px;">${count}</td>
+                        <td style="text-align:right;padding:4px 8px;">${pct}%</td>
+                    </tr>`;
+                }
+                html += "</table>";
+                resultDiv.innerHTML = html;
+            }
+            resultDiv.style.display = "block";
+        } catch (e: any) {
+            showMessage(`统计失败: ${e.message || e}`);
+        }
+    }
+}
+
+/** 从 getAttributeView 的值对象中提取文本内容 */
+function getFieldText(v: any): string {
+    if (!v) return "";
+    if (v.mSelect?.[0]?.content) return v.mSelect[0].content;
+    if (v.text?.content) return v.text.content;
+    if (v.block?.content) return v.block.content;
+    if (v.number?.content !== undefined) return String(v.number.content);
+    if (v.date?.content) return String(v.date.content);
+    return "";
 }

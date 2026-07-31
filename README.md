@@ -16,6 +16,7 @@
 | **Auto Time Recording** | When status changes to "Passed" or "Needs Fix", the execution date is automatically recorded |
 | **Project Name Auto-Fill** | Automatically retrieves the parent document's name as the project name via `getHPathByID` |
 | **Dedup Protection** | Checks the execution database via `getAttributeView` to prevent duplicate parsing |
+| **Data Statistics** | Right-click the execution database → "Data Statistics": filter by column + keywords or **regular expressions**, group by any field (status, project name, etc.), auto-includes all status values (including custom ones like "Abandoned") |
 | **Settings Persistence** | Configuration (DB IDs, polling interval, excluded keywords, etc.) persists across restarts |
 | **i18n** | Chinese and English language support |
 
@@ -134,6 +135,12 @@
 - Change status to "Passed" or "Needs Fix" → execution date is auto-filled
 - Click the primary key to jump to the specific test case in the source document
 
+### Step 5: Statistics
+- Right-click the Execution Library → "Data Statistics"
+- Choose the filter column (default: case name), enter filter values
+- Optionally enable **regex matching** (e.g. `^1\.(9|1[0-3])\.` to match cases 1.9 ~ 1.13)
+- Choose the group dimension (status, project name, etc.) — all distinct values are counted automatically
+
 ## Development
 
 ```bash
@@ -149,3 +156,14 @@ pnpm run build
 # Lint
 pnpm run lint
 ```
+
+## Version History
+
+### v0.1.0 (MVP Phase 1)
+- Implement document parsing, status auto-fill, time auto-recording, project name auto-fill
+- Support right-click parsing and auto-polling detection
+- Dedup protection, settings persistence, i18n (CN/EN)
+
+### v0.1.1
+- Data statistics: filter by column + keywords or regex, group by any field, dynamic status grouping
+- Statistics dialog with field dropdown (no manual typing)
