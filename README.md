@@ -1,169 +1,170 @@
+[English](README.en.md)
+
 # CaseMate
 
-> A SiYuan note plugin for test case management — automatically parse test cases from documents and track execution status.
+> 思源笔记测试用例管理插件 — 自动从文档中解析测试用例并跟踪执行状态。
 
-## Features
+## 功能特性
 
-### ✅ Completed (MVP Phase 1)
+### ✅ 已完成 (MVP Phase 1)
 
-| Feature | Description |
+| 功能 | 说明 |
 | :--- | :--- |
-| **Document Parsing** | Right-click any document → "Parse as Test Cases" → automatically extract test cases from headings. Uses heuristic parsing: a heading is considered a test case if it has list content underneath (`- steps`, `- expected`, etc.). Compatible with variable heading levels (H3, H4, etc.) |
-| **One-Click Parsing** | Right-click menu "Parse as Test Cases" on the document tree |
-| **Auto-Polling** | Monitors the "Test Case Document Library" (Attribute View) every 3 seconds (configurable). When a new document is added, automatically parses it and creates execution records |
-| **Block Reference** | The primary key links directly to the specific test case heading in the original document — click to jump |
-| **Status Auto-Fill** | New records are automatically set to "Untested" status |
-| **Auto Time Recording** | When status changes to "Passed" or "Needs Fix", the execution date is automatically recorded |
-| **Project Name Auto-Fill** | Automatically retrieves the parent document's name as the project name via `getHPathByID` |
-| **Dedup Protection** | Checks the execution database via `getAttributeView` to prevent duplicate parsing |
-| **Data Statistics** | Right-click the execution database → "Data Statistics": filter by column + keywords or **regular expressions**, group by any field (status, project name, etc.), auto-includes all status values (including custom ones like "Abandoned") |
-| **Settings Persistence** | Configuration (DB IDs, polling interval, excluded keywords, etc.) persists across restarts |
-| **i18n** | Chinese and English language support |
+| **文档解析** | 右键文档 →「解析为测试用例」→ 自动从标题中提取测试用例。启发式解析：标题下若包含列表内容（`- 操作步骤`、`- 预期结果` 等）则判定为用例。兼容不定层级（H3/H4 等） |
+| **一键解析** | 文档树上右键菜单「解析为测试用例」 |
+| **自动轮询** | 每3秒（可配置）监控"用例文档库"（Attribute View），新文档入库后自动解析并创建执行记录 |
+| **块引用跳转** | 主键直接关联到文档中具体用例标题块 — 点击即可跳转 |
+| **状态自动填充** | 新记录自动设为「未测试」 |
+| **时间自动记录** | 状态变为「通过」或「待修复」时，自动填入执行日期 |
+| **项目名称自动填充** | 通过 `getHPathByID` 自动获取父文档名称作为项目名称 |
+| **去重保护** | 通过 `getAttributeView` 检查执行库中是否已存在记录，防止重复解析 |
+| **数据统计** | 右键执行库 →「数据统计」：按列 + 关键词/正则过滤，按任意字段分组（状态、项目名称等），自动纳入所有状态值（含自定义的"废弃"等） |
+| **设置持久化** | 配置（库ID、轮询间隔、排除关键词等）重启后保留 |
+| **国际化** | 支持中文和英文 |
 
-### 🚧 Planned (Future Phases)
+### 🚧 计划中（后续阶段）
 
-| Feature | Description |
+| 功能 | 说明 |
 | :--- | :--- |
-| **Visual Dashboard** | Statistics and charts for test execution progress |
-| **Reports** | Export test execution reports |
-| **Batch Operations** | Bulk status updates, batch re-parsing |
+| **可视化看板** | 测试执行进度的统计图表 |
+| **报告导出** | 导出测试执行报告 |
+| **批量操作** | 批量修改状态、批量重新解析 |
 
-## How It Works
+## 实现原理
 
-### Architecture
+### 架构流程
 
 ```
-┌─ User creates a test case document ──────────────────────────┐
-│  Use Markdown headings to separate test cases                │
-│  ### Test Case Name                                          │
-│  - Steps                                                     │
-│  - Expected results                                          │
-│  - Coverage                                                  │
+┌─ 用户编写测试用例文档 ──────────────────────────────────────┐
+│  用标题区分每个测试用例                                      │
+│  ### 测试用例名称                                           │
+│  - 操作步骤                                                  │
+│  - 预期结果                                                  │
+│  - 覆盖端                                                    │
 └──────────────────────────────────────────────────────────────┘
                            │
                            ▼
-┌─ Right-click → "Add to Database" ────────────────────────────┐
-│  Add the document to the "Test Case Document Library" (AV)   │
+┌─ 右键 →「添加到数据库」────────────────────────────────────┐
+│  将文档添加到"用例文档库"（Attribute View）                  │
 └──────────────────────────────────────────────────────────────┘
                            │
                            ▼
-┌─ Auto-polling detects new document ──────────────────────────┐
-│  Every 3 seconds, queries /api/av/renderAttributeView        │
-│  Compares with known record snapshot                         │
+┌─ 自动轮询检测到新文档 ──────────────────────────────────────┐
+│  每3秒查询 /api/av/renderAttributeView                        │
+│  与已知记录快照比对，发现新增文档                            │
 └──────────────────────────────────────────────────────────────┘
                            │
                            ▼
-┌─ Parse & Create Execution Records ───────────────────────────┐
-│  1. Get document content via /api/block/getBlockKramdown     │
-│  2. Heuristically extract test cases (heading + list content)│
-│  3. Create detached rows in the execution database           │
-│  4. Set block reference (→ heading block), status, project   │
+┌─ 解析文档并创建执行记录 ────────────────────────────────────┐
+│  1. 通过 /api/block/getBlockKramdown 获取文档内容            │
+│  2. 启发式提取用例（标题 + 其下包含列表内容）                 │
+│  3. 在执行库中创建记录（使用两段式：先建行再设字段）          │
+│  4. 设置块引用（→ 用例标题块）、状态、项目名称               │
 └──────────────────────────────────────────────────────────────┘
                            │
                            ▼
-┌─ User changes status in Execution DB ────────────────────────┐
-│  Polling detects status change → auto-records execution time │
+┌─ 用户修改执行库中的状态 ────────────────────────────────────┐
+│  轮询检测到状态变更 → 自动记录执行时间                       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Database Structure
+### 数据库结构
 
-#### Test Case Document Library (User creates this)
+#### 用例文档库（用户自行创建）
 
-| Field | Type | Description |
+| 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| Primary Key | Block (auto) | References the test case document |
-| Created Time | Date | When the doc was added |
-| Project | Text | Custom project name |
+| 主键 | 块（自动） | 关联测试用例文档 |
+| 创建时间 | 日期 | 文档入库时间 |
+| 项目 | 文本 | 自定义项目名称 |
 
-#### Test Execution Library (User creates this)
+#### 测试执行库（用户自行创建）
 
-| Field | Type | Description |
+| 字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| Primary Key | Block (auto) | References the specific test case heading → click to jump |
-| Project Name | Text | Auto-filled from parent document name |
-| Status | Select | Untested / Passed / Needs Fix |
-| Execution Date | Date | Auto-filled when status changes |
+| 主键 | 块（自动） | 关联到具体用例标题块 → 点击跳转 |
+| 项目名称 | 文本 | 自动从父文档名称填充 |
+| 状态 | 单选 | 未测试 / 通过 / 待修复 |
+| 执行日期 | 日期 | 状态变更时自动填入 |
 
-### Key APIs Used
+### 关键接口
 
-| API | Purpose |
+| API | 用途 |
 | :--- | :--- |
-| `POST /api/av/renderAttributeView` | Query database content |
-| `POST /api/av/getAttributeView` | Get raw database definition (item IDs) |
-| `POST /api/av/appendAttributeViewDetachedBlocksWithValues` | Create detached rows |
-| `POST /api/av/setAttributeViewBlockAttr` | Update cell values (block ref, status, date) |
-| `POST /api/block/getBlockKramdown` | Get document content in Markdown |
-| `POST /api/filetree/getHPathByID` | Get document human-readable path |
-| `POST /api/filetree/getDoc` | Get document metadata (parentID) |
+| `POST /api/av/renderAttributeView` | 查询数据库内容 |
+| `POST /api/av/getAttributeView` | 获取数据库原始定义（item ID） |
+| `POST /api/av/appendAttributeViewDetachedBlocksWithValues` | 创建非绑定行 |
+| `POST /api/av/setAttributeViewBlockAttr` | 更新单元格值（块引用、状态、日期） |
+| `POST /api/block/getBlockKramdown` | 获取文档 Markdown 内容 |
+| `POST /api/filetree/getHPathByID` | 获取文档可读路径 |
+| `POST /api/filetree/getDoc` | 获取文档元信息（父文档 ID） |
 
-## Installation
+## 安装方法
 
-1. Download the latest `package.zip` from the [Releases](https://github.com/your-repo/case-mate/releases) page
-2. Unzip to `{workspace}/data/plugins/case-mate/`
-3. Restart SiYuan and enable the plugin in Settings → Marketplace → Downloaded
-4. Click the ✅ icon in the top bar to configure
+1. 从 [Releases](https://github.com/your-repo/case-mate/releases) 下载最新 `package.zip`
+2. 解压到 `{工作空间}/data/plugins/case-mate/`
+3. 重启思源，在「设置 → 集市 → 下载」中启用插件
+4. 点击顶栏 ✅ 图标配置
 
-## Configuration
+## 配置说明
 
-| Setting | Description |
+| 设置项 | 说明 |
 | :--- | :--- |
-| Test Case DB ID | The Attribute View ID of your test case document library |
-| Execution DB ID | The Attribute View ID of your test execution tracking library |
-| Polling Interval | How often to check for new documents (1-30s, default 3s) |
-| Excluded Keywords | Heading texts that should NOT be treated as test cases |
-| Auto-record Time | Automatically fill execution date on status change |
-| Clear Time on Reset | Clear execution date when reset to "Untested" |
+| 用例文档库 ID | 用例文档库（Attribute View）的 ID |
+| 测试执行库 ID | 测试执行库（Attribute View）的 ID |
+| 轮询间隔 | 检测新文档的频率（1-30秒，默认3秒） |
+| 忽略的标题关键词 | 这些标题不会被识别为测试用例（如：正向主流程、异常分支） |
+| 自动记录时间 | 状态变为「通过」或「待修复」时自动填入执行日期 |
+| 回退清空时间 | 状态改回「未测试」时清空执行日期 |
 
-## Usage Guide
+## 使用指引
 
-### Step 1: Create the databases
-- Create a **Test Case Document Library** (Attribute View) in any document
-- The first field (Primary Key, block type) is auto-created — keep it
-- Create a **Test Execution Library** with fields: Project Name (text), Status (select: Untested/Passed/Needs Fix), Execution Date (date)
+### 第一步：创建数据库
+- 在任意文档中插入一个**数据库块**作为「**用例文档库**」，保留默认的「主键」块类型字段
+- 再创建一个「**测试执行库**」，添加字段：项目名称（文本）、状态（单选：未测试/通过/待修复）、执行日期（日期）
 
-### Step 2: Write test case documents
-- Use Markdown headings (###, ####) for test case names
-- Add list content (- steps, - expected results, etc.) under each heading
+### 第二步：编写测试用例文档
+- 用 Markdown 标题（### / ####）区分每个测试用例
+- 标题下用列表内容（- 操作步骤、- 预期结果等）描述用例详情
 
-### Step 3: Parse into execution records
-- **Method A (Auto)**: Add the document to the Test Case Document Library via right-click → "Add to Database"
-- **Method B (Manual)**: Right-click the document → "Parse as Test Cases"
+### 第三步：解析为执行记录
+- **自动方式**：右键文档 →「添加到数据库」→ 选择用例文档库，插件自动检测并解析
+- **手动方式**：右键文档 →「解析为测试用例」
 
-### Step 4: Track execution
-- Open the Execution Library
-- Change status to "Passed" or "Needs Fix" → execution date is auto-filled
-- Click the primary key to jump to the specific test case in the source document
+### 第四步：跟踪执行状态
+- 打开测试执行库
+- 修改状态为「通过」或「待修复」→ 执行日期自动填入
+- 点击主键列 → 直接跳转到源文档中对应的用例位置
 
-### Step 5: Statistics
-- Right-click the Execution Library → "Data Statistics"
-- Choose the filter column (default: case name), enter filter values
-- Optionally enable **regex matching** (e.g. `^1\.(9|1[0-3])\.` to match cases 1.9 ~ 1.13)
-- Choose the group dimension (status, project name, etc.) — all distinct values are counted automatically
+### 第五步：数据统计
+- 右键测试执行库 →「数据统计」
+- 选择过滤列（默认为用例名称），输入过滤条件
+- 可勾选**正则匹配**（例如 `^1\.(9|1[0-3])\.` 匹配 1.9 ~ 1.13 的用例）
+- 选择分组维度（状态、项目名称等）— 自动统计该字段下出现的所有值
 
-## Development
+## 开发
 
 ```bash
-# Install dependencies
+# 安装依赖
 pnpm install
 
-# Development (with watch)
+# 开发模式（文件监听）
 pnpm run dev:app
 
-# Production build
+# 生产构建
 pnpm run build
 
-# Lint
+# 代码检查
 pnpm run lint
 ```
 
-## Version History
+## 版本历史
 
 ### v0.1.0 (MVP Phase 1)
-- Implement document parsing, status auto-fill, time auto-recording, project name auto-fill
-- Support right-click parsing and auto-polling detection
-- Dedup protection, settings persistence, i18n (CN/EN)
+- 实现文档解析、状态填充、时间自动记录、项目名称自动填充
+- 支持右键菜单解析和自动轮询检测
+- 去重保护、设置持久化、中英文国际化
 
 ### v0.1.1
-- Data statistics: filter by column + keywords or regex, group by any field, dynamic status grouping
-- Statistics dialog with field dropdown (no manual typing)
+- 数据统计：按列 + 关键词/正则过滤，按任意字段分组，状态动态统计
+- 统计对话框支持字段下拉选择（无需手填）

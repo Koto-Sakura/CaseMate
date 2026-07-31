@@ -28,8 +28,8 @@
     "zh-CN": "思源笔记测试用例管理插件 — 自动从文档中解析测试用例并跟踪执行状态"
   },
   "readme": {
-    "default": "README.md",
-    "zh-CN": "README.zh-CN.md"
+    "default": "README.en.md",
+    "zh-CN": "README.md"
   },
   "funding": {
     "openCollective": "",
