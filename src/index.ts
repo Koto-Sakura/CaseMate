@@ -983,14 +983,30 @@ export default class CaseMatePlugin extends Plugin {
         });
     }
 
-    // ── 数据库右键菜单：数据统计（通用，支持任意数据库） ────────────────────
+    // ── 数据库右键菜单：数据统计 + 智能筛选（通用，支持任意数据库） ────────
 
     private onAVMenu(event: any) {
         const detail = event.detail;
         if (!detail || !detail.menu) return;
 
-        // 从右键的数据库块元素获取 avID（data-av-id 属性），支持任意数据库
+        // 从右键的数据库块元素获取 avID 和 blockID
         const avID = detail.element?.getAttribute?.("data-av-id") || detail.element?.dataset?.avId || "";
+        const blockID = detail.element?.getAttribute?.("data-node-id") || detail.element?.dataset?.nodeId || "";
+
+        // 智能筛选菜单项
+        detail.menu.addItem({
+            id: "caseMate_filter",
+            iconHTML: "",
+            label: "智能筛选",
+            click: async () => {
+                if (!avID || !blockID) {
+                    showMessage("未能获取当前数据库信息，请直接在数据库上右键");
+                    return;
+                }
+                // 传入数据库块元素（detail.element），用于操作行 DOM
+                this.showFilterDialog(avID, detail.element);
+            },
+        });
 
         detail.menu.addItem({
             id: "caseMate_statistics",
@@ -1075,6 +1091,133 @@ export default class CaseMatePlugin extends Plugin {
                     await this.runStatistics(avID, column, filterValues, groupField, useRegex, resultDiv);
                 });
             },
+        });
+    }
+
+    // ── 智能筛选对话框（自己实现 DOM 行隐藏，支持范围/通配符/多值） ───────
+
+    private async showFilterDialog(avID: string, blockElement: HTMLElement) {
+        // 读取当前数据库的字段列表
+        let fieldDefs: FieldDef[] = [];
+        try {
+            fieldDefs = await this.getAVFieldDefs(avID);
+        } catch (_) { /* ignore */ }
+        const fieldNames = fieldDefs.map(f => f.name).filter(n => n !== "主键");
+        const defaultColumn = fieldNames.includes("用例名称") ? "用例名称" :
+            fieldNames.includes(FIELD_PROJECT_NAME) ? FIELD_PROJECT_NAME : (fieldNames[0] || "");
+
+        const optionsHtml = fieldNames.map(n =>
+            `<option value="${n}" ${n === defaultColumn ? "selected" : ""}>${n}</option>`
+        ).join("");
+
+        const dialog = new Dialog({
+            title: "CaseMate 智能筛选",
+            content: `<div class="b3-dialog__content">
+    <div style="margin-bottom:12px;">
+        <label style="font-weight:500;display:block;margin-bottom:4px;">筛选列（字段名）</label>
+        <select id="cmFilterColumn" class="b3-text-field fn__block">${optionsHtml}</select>
+    </div>
+    <div style="margin-bottom:12px;">
+        <label style="font-weight:500;display:block;margin-bottom:4px;">筛选条件（多个用逗号分隔）</label>
+        <input id="cmFilterValue" class="b3-text-field fn__block" placeholder="例如：1.9,1.9~1.13,*登录*" value="">
+    </div>
+    <div style="margin-bottom:4px;color:var(--b3-theme-on-surface-light);font-size:12px;line-height:1.6;">
+        智能匹配规则：<br>
+        · 输入 <b>1.9</b> → 匹配所有 1.9 开头的用例<br>
+        · 输入 <b>1.9~1.13</b> 或 <b>1.9-1.13</b> → 匹配序号范围<br>
+        · 输入 <b>*登录*</b> → 通配符（* 匹配任意字符）<br>
+        · 输入 <b>登录</b> → 名称中包含"登录"<br>
+        · 多个条件用逗号分隔，满足任一即显示
+    </div>
+</div>
+<div class="b3-dialog__action">
+    <button id="cmFilterClear" class="b3-button b3-button--cancel">清除筛选</button>
+    <button id="cmFilterCancel" class="b3-button b3-button--cancel">取消</button>
+    <button id="cmFilterApply" class="b3-button b3-button--text">应用筛选</button>
+</div>`,
+            width: "520px",
+        });
+
+        const columnSelect = dialog.element.querySelector("#cmFilterColumn") as HTMLSelectElement;
+        const valueInput = dialog.element.querySelector("#cmFilterValue") as HTMLInputElement;
+
+        // 获取数据库视图中的行元素（表格/画廊/看板通用：带 data-id 的行）
+        const getRowElements = (): HTMLElement[] => {
+            const selectors = [
+                ".av__row[data-id]",
+                ".av__gallery-item[data-id]",
+                ".av__kanban-item[data-id]",
+            ];
+            const result: HTMLElement[] = [];
+            for (const sel of selectors) {
+                blockElement.querySelectorAll(sel).forEach(el => result.push(el as HTMLElement));
+            }
+            return result;
+        };
+
+        dialog.element.querySelector("#cmFilterCancel")?.addEventListener("click", () => dialog.destroy());
+
+        // 清除筛选：恢复所有行显示
+        dialog.element.querySelector("#cmFilterClear")?.addEventListener("click", () => {
+            getRowElements().forEach(row => { row.style.display = ""; });
+            showMessage("已清除筛选");
+            dialog.destroy();
+        });
+
+        // 应用筛选：自己实现匹配 + DOM 隐藏
+        dialog.element.querySelector("#cmFilterApply")?.addEventListener("click", async () => {
+            const columnName = columnSelect.value.trim();
+            const rawValue = valueInput.value.trim();
+            if (!columnName || !rawValue) {
+                showMessage("请选择筛选列并输入筛选条件");
+                return;
+            }
+            const filterValues = rawValue.split(",").map(s => s.trim()).filter(s => s.length > 0);
+
+            try {
+                // 1. 读取数据库数据
+                const rawData: any = await fetchPostAsync("/api/av/getAttributeView", { id: avID });
+                const keyValues: any[] = rawData?.av?.keyValues || [];
+                const itemIDs: string[] = rawData?.av?.views?.[0]?.itemIds || [];
+
+                // 2. 找到筛选列的 keyValue 并构建 itemID → 值 映射
+                const columnKV = keyValues.find((kv: any) => kv.key?.name === columnName);
+                if (!columnKV) {
+                    showMessage(`找不到列 "${columnName}"，请检查列名是否正确`);
+                    return;
+                }
+                const columnValues: Record<string, string> = {};
+                for (const v of (columnKV.values || [])) {
+                    columnValues[v.blockID] = getFieldText(v);
+                }
+
+                // 3. 智能匹配：任一条件匹配即保留
+                const matchedIDs = new Set<string>();
+                for (const itemID of itemIDs) {
+                    const val = columnValues[itemID] || "";
+                    if (filterValues.some(fv => matchSmart(val, fv))) {
+                        matchedIDs.add(itemID);
+                    }
+                }
+
+                // 4. DOM 行隐藏
+                const rows = getRowElements();
+                let hidden = 0;
+                rows.forEach(row => {
+                    const id = row.getAttribute("data-id");
+                    if (id && !matchedIDs.has(id)) {
+                        row.style.display = "none";
+                        hidden++;
+                    } else {
+                        row.style.display = "";
+                    }
+                });
+
+                showMessage(`已筛选：显示 ${matchedIDs.size} 行，隐藏 ${hidden} 行`);
+                dialog.destroy();
+            } catch (e: any) {
+                showMessage(`应用筛选失败: ${e.message || e}`);
+            }
         });
     }
 

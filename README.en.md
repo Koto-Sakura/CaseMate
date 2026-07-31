@@ -144,6 +144,12 @@
 - Advanced users can enable **regex matching** (e.g. `^1\.(9|1[0-3])\.` to match cases 1.9 ~ 1.13)
 - Choose the group dimension — all distinct values are counted automatically
 
+### Step 6: Smart Filter (works on any database, temporary view filtering)
+- Right-click **any database** → "Smart Filter"
+- Choose the filter column, enter one or more conditions (comma-separated, any match shows the row)
+- **Smart matching**: `1.9` prefix, `1.9~1.13` range, `*登录*` wildcard, `登录` contains
+- The database shows only matching rows (temporary, restored after refresh)
+
 ## Development
 
 ```bash
@@ -174,3 +180,7 @@ pnpm run lint
 ### v0.1.2
 - Smart matching for statistics: prefix match (`1.9`), range match (`1.9~1.13`), wildcard (`*登录*`), contains match — no regex knowledge needed
 - Regex mode kept as an advanced option
+
+### v0.1.3
+- Statistics and smart filter now work on any database (read the right-clicked database's data-av-id)
+- New smart filter: self-implemented DOM row hiding, supports ranges/wildcards/multi-values (OR), temporarily shows only matching rows in the database
