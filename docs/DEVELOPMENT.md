@@ -27,7 +27,7 @@
 | 文档解析为用例 | 右键文档 →「解析为测试用例」 | 启发式解析：标题下含列表内容（`- 操作步骤` 等）即视为用例 |
 | 自动轮询 | 每 3 秒（可配置） | 监控"用例文档库"新增记录，自动解析 |
 | 状态自动填充 | 自动 | 新记录默认「未测试」 |
-| 时间自动记录 | 自动 | 状态变为「通过」/「待修复」时填入执行日期 |
+| 时间自动记录 | 自动 | 状态变为「通过」/「测试中」/「待修复」时填入执行日期 |
 | 项目名称自动填充 | 自动 | 通过 `getHPathByID` 取父文档名 |
 | 主键跳转 | 自动 | 主键关联到文档中具体标题块，点击跳转 |
 | 去重保护 | 自动 | `docExistsInExecDB` 防止重复解析 |
@@ -105,13 +105,24 @@ POST /api/av/getAttributeView
 
 ### 4.2 创建记录（两段式！）
 
-`appendAttributeViewDetachedBlocksWithValues` **不能一次性设置所有字段**（块引用和状态会失败）。必须分两步：
+> ⚠️ **v3.8.0 兼容要点（重要！）**：思源 v3.8.0 起（issue #18539 移除顶层 ViewID），
+> `updateAttributeViewValue0` 新增硬校验：对 **block 主键字段无值** 的行，任何
+> `setAttributeViewBlockAttr` 都会返回 `ErrItemNotFound`（前端表现为 "item not found V3.8.0"）。
+> 因此**创建行时必须同步带上主键 block 值**（不能再"先建空行再设主键"），否则主键/状态全部写入失败，
+> 只留下只有项目名称的空行（数据库里看起来就是"没有用例记录"）。该写法在 v3.7.0 同样兼容。
 
 ```typescript
-// 第一步：只创建含文本字段的行（不含主键/状态！）
+// 第一步：创建行，并随行写入主键 block 值（兼容 v3.8.0 的绑定校验）
 POST /api/av/appendAttributeViewDetachedBlocksWithValues
-{ avID, blocksValues: [[{ keyID, text: { content: "项目名" } }]] }
-// ⚠️ 坑: 该 API 返回 null，无法直接拿到新行 ID
+{
+  avID,
+  blocksValues: [[
+    { keyID: 主键字段ID, type: "block", block: { id: 标题块ID, content: "用例名" } }, // 主键必须放数组首位
+    { keyID: 项目名称字段ID, text: { content: "项目名" } }
+  ]]
+}
+// ⚠️ 坑: 该 API 返回 null，无法直接拿到新行 ID；服务端会以传入的标题块ID 作为行的 itemID，
+//       并把 block.ID 暂时置空（content 保留），后续仍需第三步补全 block.ID 才能跳转
 
 // 第二步：等 500ms 后，对比 getAVItemIDs 前后差值找到新行ID
 const beforeIDs = await this.getAVItemIDs(avID);
@@ -120,7 +131,7 @@ await new Promise(r => setTimeout(r, 500));
 const afterIDs = await this.getAVItemIDs(avID);
 const newIDs = afterIDs.filter(id => !beforeIDs.includes(id));
 
-// 第三步：逐行设置字段
+// 第三步：逐行补全字段（此时 GetBlockValue 已命中，v3.8.0 不再报 item not found）
 POST /api/av/setAttributeViewBlockAttr
 {
   avID, keyID, itemID,
@@ -199,7 +210,7 @@ POST /api/filetree/getHPathByID
 1. getAttributeView 读取执行库
 2. 从 keyValues 提取状态列、日期列的值（itemID → 值 映射）
 3. 与内存快照 knownExecRecords 对比
-4. 状态变化 → 变为"通过/待修复" → setAttributeViewBlockAttr 写日期
+4. 状态变化 → 变为"通过/测试中/待修复" → setAttributeViewBlockAttr 写日期
 5. 更新内存快照，防止重复触发
 ```
 
@@ -311,7 +322,7 @@ git push origin master   # 无需代理，走 22 端口
 | 测试执行库 ID | 空 | 测试执行库的 Attribute View ID |
 | 轮询间隔 | 3 秒 | 检测新文档频率（1-30） |
 | 忽略的标题关键词 | 正向主流程,异常分支,... | 这些标题不视为用例 |
-| 自动记录时间 | 开 | 状态变为通过/待修复时记时间 |
+| 自动记录时间 | 开 | 状态变为通过/测试中/待修复时记时间 |
 | 回退清空时间 | 关 | 状态改回未测试时清空日期 |
 
 ---

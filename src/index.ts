@@ -595,10 +595,18 @@ export default class CaseMatePlugin extends Plugin {
             const beforeIDs = await this.getAVItemIDs(this.config.execDBID);
             console.log("CaseMate: 创建前 item 数 =", beforeIDs.length);
 
-            // 创建仅含文本字段的行（项目名称）
+            // 创建行：必须带上主键 block 值。
+            // ⚠️ 思源 v3.8.0 起（issue #18539），updateAttributeViewValue0 要求行在 block 主键字段
+            // 已有值，否则后续 setAttributeViewBlockAttr 返回 ErrItemNotFound（"item not found V3.8.0"）。
+            // 创建时先写入主键值（服务端会暂置空 block.ID），第三步再补 block.ID 实现跳转。
             const blocksValues: any[][] = [];
-            for (let i = 0; i < cases.length; i++) {
+            for (const c of cases) {
                 const rowVals: any[] = [];
+                rowVals.push({
+                    keyID: primaryKeyID,
+                    type: "block",
+                    block: { id: c.blockID || blockID, content: c.name },
+                });
                 // 如果有项目名称字段，填入该字段
                 if (projectKeyID) {
                     rowVals.push({ keyID: projectKeyID, text: { content: projectName } });
@@ -911,9 +919,16 @@ export default class CaseMatePlugin extends Plugin {
                         const beforeIDs = await this.getAVItemIDs(this.config.execDBID);
                         console.log("CaseMate: 创建前 item 数 =", beforeIDs.length);
 
+                        // 创建行：必须带上主键 block 值（兼容 v3.8.0 的 GetBlockValue 校验，
+                        // 详见 parseDocumentAndCreateRecords 中的注释）
                         const blocksValues: any[][] = [];
-                        for (let i = 0; i < cases.length; i++) {
+                        for (const c of cases) {
                             const rowVals: any[] = [];
+                            rowVals.push({
+                                keyID: pkField.id,
+                                type: "block",
+                                block: { id: c.blockID || blockID, content: c.name },
+                            });
                             if (projectKeyID) {
                                 rowVals.push({ keyID: projectKeyID, text: { content: projectName } });
                             }
