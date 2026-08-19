@@ -20,7 +20,7 @@
 
 ---
 
-## 2. 已完成功能（v0.1.3）
+## 2. 已完成功能（v0.1.6）
 
 | 功能 | 入口 | 说明 |
 | :--- | :--- | :--- |
@@ -103,44 +103,47 @@ POST /api/av/getAttributeView
 //       data.av.views[0].itemIds[]（所有记录ID）
 ```
 
-### 4.2 创建记录（两段式！）
+### 4.2 创建执行记录（绑定块！不要用 Detached API）
 
-> ⚠️ **v3.8.0 兼容要点（重要！）**：思源 v3.8.0 起（issue #18539 移除顶层 ViewID），
-> `updateAttributeViewValue0` 新增硬校验：对 **block 主键字段无值** 的行，任何
-> `setAttributeViewBlockAttr` 都会返回 `ErrItemNotFound`（前端表现为 "item not found V3.8.0"）。
-> 因此**创建行时必须同步带上主键 block 值**（不能再"先建空行再设主键"），否则主键/状态全部写入失败，
-> 只留下只有项目名称的空行（数据库里看起来就是"没有用例记录"）。该写法在 v3.7.0 同样兼容。
+> ⚠️ **重要（v0.1.6 修正）**：`appendAttributeViewDetachedBlocksWithValues` 本来就是创建**非绑定（Detached）行**
+> 的 API——主键的 blockID 是内核新建的，**会忽略传入的 `block.id`**（官方 issue #15311，维护者确认
+> "该接口本来就是创建非绑定块的"）。因此"创建行时传 block 值"的做法无法让主键关联到标题块，
+> 数据库里主键只会显示为普通文字、需要手动逐行关联。
+>
+> **正确做法：用 `/api/av/addAttributeViewBlocks` 直接绑定标题块**（`srcs` 中 `isDetached: false`）。
+> 绑定后行的主键天然就是该块（可点击跳转），且行 itemID 即标题块 ID，后续设置字段直接用它即可。
 
 ```typescript
-// 第一步：创建行，并随行写入主键 block 值（兼容 v3.8.0 的绑定校验）
-POST /api/av/appendAttributeViewDetachedBlocksWithValues
+// 第一步：绑定用例标题块为执行库行（主键即块引用，可跳转）
+POST /api/av/addAttributeViewBlocks
 {
   avID,
-  blocksValues: [[
-    { keyID: 主键字段ID, type: "block", block: { id: 标题块ID, content: "用例名" } }, // 主键必须放数组首位
-    { keyID: 项目名称字段ID, text: { content: "项目名" } }
-  ]]
+  srcs: [{ id: 标题块ID, isDetached: false, content: "用例名" }],  // isDetached: false = 绑定块
+  ignoreDefaultFill: true
 }
-// ⚠️ 坑: 该 API 返回 null，无法直接拿到新行 ID；服务端会以传入的标题块ID 作为行的 itemID，
-//       并把 block.ID 暂时置空（content 保留），后续仍需第三步补全 block.ID 才能跳转
+// ⚠️ 返回 data 为 null；以 getAVItemIDs 前后差值找新行 itemID
+// ⚠️ 行 itemID = 标题块 ID（绑定块的语义），设置字段直接用标题块 ID 即可
 
-// 第二步：等 500ms 后，对比 getAVItemIDs 前后差值找到新行ID
+// 第二步：等 500ms 后，对比 getAVItemIDs 前后差值找到新行ID（与旧两段式相同）
 const beforeIDs = await this.getAVItemIDs(avID);
-// ... 创建 ...
+// ... 绑定 ...
 await new Promise(r => setTimeout(r, 500));
 const afterIDs = await this.getAVItemIDs(avID);
 const newIDs = afterIDs.filter(id => !beforeIDs.includes(id));
 
-// 第三步：逐行补全字段（此时 GetBlockValue 已命中，v3.8.0 不再报 item not found）
+// 第三步：逐行补全字段（项目名称/状态；主键已绑定，无需再写）
 POST /api/av/setAttributeViewBlockAttr
 {
   avID, keyID, itemID,
-  value: {
-    type: "block",
-    block: { id: 标题块ID, content: "用例名" }   // 主键：必须 id+content 都有
-  }
+  value: { text: { content: "项目名" } }        // 项目名称
+  // 或 value: { mSelect: [{ content: "未测试" }] }   // 状态
 }
 ```
+
+> ⚠️ 旧"两段式"（`appendAttributeViewDetachedBlocksWithValues` 传 block 值 + 第三步 `setAttributeViewBlockAttr`
+> 写主键）已废弃，不要再使用：第一步创建的行是 Detached 行（主键为新建块、显示普通文字），
+> 第三步能否把主键改写为绑定块在不同版本行为不一致（v3.8.0 下实测不生效）。
+> 去重方式也改为按「标题块 ID 集合」（`getExecDBBoundBlockIDs`）过滤，而不是按文档 ID 查主键。
 
 ### 4.3 字段值格式（Go 源码 av/value.go 验证）
 
@@ -200,8 +203,8 @@ POST /api/filetree/getHPathByID
 2. extractTestCases 解析用例（名称+标题块ID）
 3. getExecFieldMap 取字段映射（兼容"项目名称"与"用例名称"）
 4. getParentDocName 取父文档名 → 项目名称
-5. docExistsInExecDB 去重（已存在则跳过）
-6. 两段式创建：建行 → 等500ms → 找新行ID → 逐行设字段
+5. getExecDBBoundBlockIDs 去重（过滤掉已在执行库中的标题块，防重复绑定）
+6. addAttributeViewBlocks 绑定标题块为行（主键即块引用）→ 等500ms → 找新行ID → 逐行设项目名称/状态
 ```
 
 ### 5.3 时间自动记录（pollExecutionDatabase）

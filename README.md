@@ -58,8 +58,9 @@
 ┌─ 解析文档并创建执行记录 ────────────────────────────────────┐
 │  1. 通过 /api/block/getBlockKramdown 获取文档内容            │
 │  2. 启发式提取用例（标题 + 其下包含列表内容）                 │
-│  3. 在执行库中创建记录（使用两段式：先建行再设字段）          │
-│  4. 设置块引用（→ 用例标题块）、状态、项目名称               │
+│  3. 通过 addAttributeViewBlocks 直接绑定用例标题块为执行库行  │
+│     （主键即块引用，点击可跳转，无需手动关联）                │
+│  4. 设置状态、项目名称                                       │
 └──────────────────────────────────────────────────────────────┘
                            │
                            ▼
@@ -93,8 +94,8 @@
 | :--- | :--- |
 | `POST /api/av/renderAttributeView` | 查询数据库内容 |
 | `POST /api/av/getAttributeView` | 获取数据库原始定义（item ID） |
-| `POST /api/av/appendAttributeViewDetachedBlocksWithValues` | 创建非绑定行 |
-| `POST /api/av/setAttributeViewBlockAttr` | 更新单元格值（块引用、状态、日期） |
+| `POST /api/av/addAttributeViewBlocks` | 绑定已有块为数据库行（主键即块引用） |
+| `POST /api/av/setAttributeViewBlockAttr` | 更新单元格值（状态、日期、项目名称） |
 | `POST /api/block/getBlockKramdown` | 获取文档 Markdown 内容 |
 | `POST /api/filetree/getHPathByID` | 获取文档可读路径 |
 | `POST /api/filetree/getDoc` | 获取文档元信息（父文档 ID） |
@@ -187,3 +188,7 @@ pnpm run lint
 ### v0.1.4
 - 修复思源 v3.8.0 兼容问题：创建执行记录时同步绑定主键 block 值，解决「item not found V3.8.0」导致主键/状态写入失败、数据库看不到用例记录的问题（v3.7.0 同样兼容）
 - 状态新增「测试中」：时间自动记录覆盖通过/测试中/待修复，i18n 与文档同步更新
+
+### v0.1.6
+- 修复主键不关联标题块的问题：改用官方绑定 API `addAttributeViewBlocks` 直接绑定用例标题块为执行库行，主键即为可点击跳转的块引用，不再产生需要手动逐行关联的普通文字记录（根因：`appendAttributeViewDetachedBlocksWithValues` 创建的是非绑定 Detached 行，会忽略传入的 block.id，官方 issue #15311）
+- 去重逻辑同步改为按「标题块 ID 集合」过滤，防止重复绑定

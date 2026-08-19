@@ -488,23 +488,24 @@ export default class CaseMatePlugin extends Plugin {
         }
     }
 
-    /** 使用 getAttributeView 检查文档是否已在执行库中存在 */
-    private async docExistsInExecDB(blockID: string): Promise<boolean> {
+    /** 获取执行库中已绑定（主键 block 字段）的所有块 ID 集合，用于去重 */
+    private async getExecDBBoundBlockIDs(): Promise<Set<string>> {
+        const ids = new Set<string>();
         try {
             const rawData: any = await fetchPostAsync("/api/av/getAttributeView", {
                 id: this.config.execDBID,
             });
             const keyValues: any[] = rawData?.av?.keyValues || [];
-            // 找到 block 类型（主键）字段
+            // 找到 block 类型（主键）字段，收集所有已绑定块的 ID
             for (const kv of keyValues) {
                 if (kv.key?.type === "block") {
                     for (const v of (kv.values || [])) {
-                        if (v.block?.id === blockID) return true;
+                        if (v.block?.id) ids.add(v.block.id);
                     }
                 }
             }
         } catch (_) { /* ignore */ }
-        return false;
+        return ids;
     }
 
     /** 获取项目名称 — 通过 hPath 取父文档名称，根文档则取自身 */
@@ -581,77 +582,71 @@ export default class CaseMatePlugin extends Plugin {
         const projectName = await this.getParentDocName(blockID);
         console.log("CaseMate: projectName =", projectName);
 
-        // 4. 去重检查 — 如果文档已在执行库中，跳过
+        // 4. 去重检查 — 过滤掉已在执行库中的标题块（防止重复绑定）
+        let pendingCases = cases;
         try {
-            if (await this.docExistsInExecDB(blockID)) {
-                console.log("CaseMate: 文档已在执行库中，跳过", blockID);
+            const boundIDs = await this.getExecDBBoundBlockIDs();
+            pendingCases = cases.filter(c => !boundIDs.has(c.blockID));
+            if (pendingCases.length === 0) {
+                console.log("CaseMate: 文档的所有用例均已在执行库中，跳过", blockID);
+                showMessage(this.i18n.parseSkip.replace("{count}", String(cases.length)));
                 return;
             }
         } catch (_) { /* ignore */ }
 
-        // 5. 创建执行记录 — 两段式：先创建行，再单独设置字段
+        // 5. 创建执行记录 — 直接绑定用例标题块为执行库行（主键即块引用，可跳转）
         try {
-            // 第一步：用 getAttributeView 获取当前 itemID 基线
+            // 用 getAttributeView 获取当前 itemID 基线（用于找出新增行）
             const beforeIDs = await this.getAVItemIDs(this.config.execDBID);
             console.log("CaseMate: 创建前 item 数 =", beforeIDs.length);
 
-            // 创建行：必须带上主键 block 值。
-            // ⚠️ 思源 v3.8.0 起（issue #18539），updateAttributeViewValue0 要求行在 block 主键字段
-            // 已有值，否则后续 setAttributeViewBlockAttr 返回 ErrItemNotFound（"item not found V3.8.0"）。
-            // 创建时先写入主键值（服务端会暂置空 block.ID），第三步再补 block.ID 实现跳转。
-            const blocksValues: any[][] = [];
-            for (const c of cases) {
-                const rowVals: any[] = [];
-                rowVals.push({
-                    keyID: primaryKeyID,
-                    type: "block",
-                    block: { id: c.blockID || blockID, content: c.name },
-                });
-                // 如果有项目名称字段，填入该字段
-                if (projectKeyID) {
-                    rowVals.push({ keyID: projectKeyID, text: { content: projectName } });
-                }
-                blocksValues.push(rowVals);
-            }
-
-            console.log("CaseMate: 创建", blocksValues.length, "条记录");
-            await fetchPostAsync("/api/av/appendAttributeViewDetachedBlocksWithValues", {
+            // ⚠️ 不要用 appendAttributeViewDetachedBlocksWithValues 传 block 值创建行：
+            // 该 API 创建的是非绑定（Detached）行，内核会忽略传入的 block.id 新建一个块
+            // （官方 issue #15311），导致主键变成普通文字、无法跳转。
+            // 绑定已有块必须用 addAttributeViewBlocks（srcs 中 isDetached: false）。
+            const srcs = pendingCases.map(c => ({
+                id: c.blockID || blockID,
+                isDetached: false,
+                content: c.name,
+            }));
+            console.log("CaseMate: 绑定", srcs.length, "个标题块");
+            await fetchPostAsync("/api/av/addAttributeViewBlocks", {
                 avID: this.config.execDBID,
-                blocksValues,
+                srcs,
+                ignoreDefaultFill: true,
             });
 
-            // 第二步：等500ms后重新获取 itemID，找到新增的行
+            // 等500ms后重新获取 itemID，找到新增的行
             await new Promise(r => setTimeout(r, 500));
             const afterIDs = await this.getAVItemIDs(this.config.execDBID);
             const newIDs = afterIDs.filter(id => !beforeIDs.includes(id));
             console.log("CaseMate: 创建后 item 数 =", afterIDs.length, "新增 =", newIDs.length);
 
-            // 第三步：为每个新行设置块引用（指向用例标题块）和状态
-            for (let i = 0; i < newIDs.length && i < cases.length; i++) {
+            // 为每个新行设置项目名称与状态（主键已由绑定完成，无需再写）
+            const statusKeyID = fieldMap[FIELD_STATUS];
+            for (let i = 0; i < newIDs.length && i < pendingCases.length; i++) {
                 const itemID = newIDs[i];
-                const c = cases[i];
-                // 设置块引用 — 指向用例标题块，不是文档根节点
-                await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
-                    avID: this.config.execDBID,
-                    keyID: primaryKeyID,
-                    itemID,
-                    value: {
-                        type: "block",
-                        block: { id: c.blockID || blockID, content: c.name },
-                    },
-                });
-                // 设置状态默认值
-                const statusKeyID = fieldMap[FIELD_STATUS];
+                if (projectKeyID) {
+                    try {
+                        await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
+                            avID: this.config.execDBID,
+                            keyID: projectKeyID,
+                            itemID,
+                            value: { text: { content: projectName } },
+                        });
+                    } catch (e: any) {
+                        console.warn("CaseMate: setProject error", e.message || e);
+                    }
+                }
                 if (statusKeyID) {
                     try {
-                        const valueObj = {
-                            mSelect: [{ content: STATUS_UNTESTED }],
-                        };
                         const result = await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
                             avID: this.config.execDBID,
                             keyID: statusKeyID,
                             itemID,
-                            value: valueObj,
+                            value: {
+                                mSelect: [{ content: STATUS_UNTESTED }],
+                            },
                         });
                         console.log("CaseMate: setStatus OK", JSON.stringify(result).substring(0, 100));
                     } catch (e: any) {
@@ -659,11 +654,11 @@ export default class CaseMatePlugin extends Plugin {
                     }
                 }
             }
-            console.log("CaseMate: 已更新", Math.min(newIDs.length, cases.length), "条记录的字段");
+            console.log("CaseMate: 已更新", Math.min(newIDs.length, pendingCases.length), "条记录的字段");
 
             showMessage(
                 this.i18n.parseComplete
-                    .replace("{count}", String(cases.length))
+                    .replace("{count}", String(pendingCases.length))
                     .replace("{docCount}", "1"),
             );
 
@@ -859,18 +854,6 @@ export default class CaseMatePlugin extends Plugin {
 
                 let totalCases = 0;
 
-                // 单文档处理（右键菜单每次操作一个文档）
-                // 去重检查：如果文档已在执行库中，跳过
-                if (this.config.execDBID) {
-                    try {
-                        if (await this.docExistsInExecDB(blockID)) {
-                            console.log("CaseMate: 文档已在执行库中，跳过", blockID);
-                            showMessage(this.i18n.parseSkip.replace("{count}", "1"));
-                            return;
-                        }
-                    } catch (_) { /* ignore */ }
-                }
-
                 // 读取文档
                 let kramdownResp: any;
                 try {
@@ -897,6 +880,20 @@ export default class CaseMatePlugin extends Plugin {
                     return;
                 }
 
+                // 去重检查 — 过滤掉已在执行库中的标题块（防止重复绑定）
+                let pendingCases = cases;
+                if (this.config.execDBID) {
+                    try {
+                        const boundIDs = await this.getExecDBBoundBlockIDs();
+                        pendingCases = cases.filter(c => !boundIDs.has(c.blockID));
+                        if (pendingCases.length === 0) {
+                            console.log("CaseMate: 文档的所有用例均已在执行库中，跳过", blockID);
+                            showMessage(this.i18n.parseSkip.replace("{count}", String(cases.length)));
+                            return;
+                        }
+                    } catch (_) { /* ignore */ }
+                }
+
                 // 创建执行记录
                 if (this.config.execDBID) {
                     try {
@@ -915,54 +912,48 @@ export default class CaseMatePlugin extends Plugin {
                         const projectName = await this.getParentDocName(blockID);
                         console.log("CaseMate: projectName =", projectName);
 
-                        // 两段式创建：先创建含项目名称的行
+                        // 直接绑定用例标题块为执行库行（主键即块引用，可跳转）
                         const beforeIDs = await this.getAVItemIDs(this.config.execDBID);
                         console.log("CaseMate: 创建前 item 数 =", beforeIDs.length);
 
-                        // 创建行：必须带上主键 block 值（兼容 v3.8.0 的 GetBlockValue 校验，
-                        // 详见 parseDocumentAndCreateRecords 中的注释）
-                        const blocksValues: any[][] = [];
-                        for (const c of cases) {
-                            const rowVals: any[] = [];
-                            rowVals.push({
-                                keyID: pkField.id,
-                                type: "block",
-                                block: { id: c.blockID || blockID, content: c.name },
-                            });
-                            if (projectKeyID) {
-                                rowVals.push({ keyID: projectKeyID, text: { content: projectName } });
-                            }
-                            blocksValues.push(rowVals);
-                        }
-                        console.log("CaseMate: 创建", blocksValues.length, "条记录");
-
-                        await fetchPostAsync("/api/av/appendAttributeViewDetachedBlocksWithValues", {
+                        // ⚠️ 不要用 appendAttributeViewDetachedBlocksWithValues 传 block 值创建行：
+                        // 该 API 创建的是非绑定（Detached）行，内核会忽略传入的 block.id 新建一个块
+                        // （官方 issue #15311），导致主键变成普通文字、无法跳转。
+                        // 绑定已有块必须用 addAttributeViewBlocks（srcs 中 isDetached: false）。
+                        const srcs = pendingCases.map(c => ({
+                            id: c.blockID || blockID,
+                            isDetached: false,
+                            content: c.name,
+                        }));
+                        console.log("CaseMate: 绑定", srcs.length, "个标题块");
+                        await fetchPostAsync("/api/av/addAttributeViewBlocks", {
                             avID: this.config.execDBID,
-                            blocksValues,
+                            srcs,
+                            ignoreDefaultFill: true,
                         });
 
-                        // 等500ms后重新获取 itemID
+                        // 等500ms后重新获取 itemID，找到新增的行
                         await new Promise(r => setTimeout(r, 500));
                         const afterIDs = await this.getAVItemIDs(this.config.execDBID);
                         const newIDs = afterIDs.filter(id => !beforeIDs.includes(id));
                         console.log("CaseMate: 创建后 item 数 =", afterIDs.length, "新增 =", newIDs.length);
 
-                        // 为每个新行设置块引用和状态
-                        for (let i = 0; i < newIDs.length && i < cases.length; i++) {
+                        // 为每个新行设置项目名称与状态（主键已由绑定完成，无需再写）
+                        const statusKeyID = fieldMap[FIELD_STATUS];
+                        for (let i = 0; i < newIDs.length && i < pendingCases.length; i++) {
                             const itemID = newIDs[i];
-                            const c = cases[i];
-                            // 设置块引用（主键）— 指向用例标题块
-                            await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
-                                avID: this.config.execDBID,
-                                keyID: pkField.id,
-                                itemID,
-                                value: {
-                                    type: "block",
-                                    block: { id: c.blockID || blockID, content: c.name },
-                                },
-                            });
-                            // 设置状态默认值
-                            const statusKeyID = fieldMap[FIELD_STATUS];
+                            if (projectKeyID) {
+                                try {
+                                    await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
+                                        avID: this.config.execDBID,
+                                        keyID: projectKeyID,
+                                        itemID,
+                                        value: { text: { content: projectName } },
+                                    });
+                                } catch (e: any) {
+                                    console.warn("CaseMate: setProject error", e.message || e);
+                                }
+                            }
                             if (statusKeyID) {
                                 try {
                                     const result = await fetchPostAsync("/api/av/setAttributeViewBlockAttr", {
@@ -979,8 +970,8 @@ export default class CaseMatePlugin extends Plugin {
                                 }
                             }
                         }
-                        console.log("CaseMate: 已更新", Math.min(newIDs.length, cases.length), "条记录的字段");
-                        totalCases += Math.min(newIDs.length, cases.length);
+                        console.log("CaseMate: 已更新", Math.min(newIDs.length, pendingCases.length), "条记录的字段");
+                        totalCases += Math.min(newIDs.length, pendingCases.length);
                         this.execFieldCache = null;
                     } catch (e: any) {
                         console.warn("CaseMate batch create error:", e.message || e);
