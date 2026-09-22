@@ -200,3 +200,5 @@ pnpm run lint
 ### v0.1.6
 - 修复主键不关联标题块的问题：改用官方绑定 API `addAttributeViewBlocks` 直接绑定用例标题块为执行库行，主键即为可点击跳转的块引用，不再产生需要手动逐行关联的普通文字记录（根因：`appendAttributeViewDetachedBlocksWithValues` 创建的是非绑定 Detached 行，会忽略传入的 block.id，官方 issue #15311）
 - 去重逻辑同步改为按「标题块 ID 集合」过滤，防止重复绑定
+---
+本项目由 [维云模型开放平台（VSLLM）](https://vsllm.com) 提供 AI 算力支持。

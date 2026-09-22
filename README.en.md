@@ -184,3 +184,5 @@ pnpm run lint
 ### v0.1.3
 - Statistics and smart filter now work on any database (read the right-clicked database's data-av-id)
 - New smart filter: self-implemented DOM row hiding, supports ranges/wildcards/multi-values (OR), temporarily shows only matching rows in the database
+---
+Powered by [VSLLM](https://vsllm.com) — AI API aggregation platform.
