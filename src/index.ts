@@ -205,6 +205,9 @@ export default class CaseMatePlugin extends Plugin {
         });
         this.eventBus.on("open-menu-doctree", this.onDocTreeMenu.bind(this));
         this.eventBus.on("open-menu-av", this.onAVMenu.bind(this));
+        // v3.8.0 兜底：open-menu-av 可能因 protyle.app.plugins 分发问题收不到，
+        // 同时监听 open-menu-content（块级右键事件），从元素向上找数据库块
+        this.eventBus.on("open-menu-content", this.onAVContentMenu.bind(this));
         this.startPolling();
     }
 
@@ -213,6 +216,7 @@ export default class CaseMatePlugin extends Plugin {
         this.stopPolling();
         this.eventBus.off("open-menu-doctree", this.onDocTreeMenu.bind(this));
         this.eventBus.off("open-menu-av", this.onAVMenu.bind(this));
+        this.eventBus.off("open-menu-content", this.onAVContentMenu.bind(this));
     }
 
     // ── 设置面板 ────────────────────────────────────────────────────────────
@@ -993,13 +997,21 @@ export default class CaseMatePlugin extends Plugin {
 
     private onAVMenu(event: any) {
         const detail = event.detail;
-        if (!detail || !detail.menu) return;
+        console.log("CaseMate onAVMenu: 事件触发, detail keys =", detail ? Object.keys(detail) : detail);
+        console.log("CaseMate onAVMenu: detail.menu =", detail?.menu, "| menu.menus?.length =", detail?.menu?.menus?.length);
+        console.log("CaseMate onAVMenu: detail.element =", detail?.element);
+        if (!detail || !detail.menu) {
+            console.warn("CaseMate onAVMenu: detail 或 detail.menu 为空，提前返回");
+            return;
+        }
 
         // 从右键的数据库块元素获取 avID 和 blockID
         const avID = detail.element?.getAttribute?.("data-av-id") || detail.element?.dataset?.avId || "";
         const blockID = detail.element?.getAttribute?.("data-node-id") || detail.element?.dataset?.nodeId || "";
+        console.log("CaseMate onAVMenu: avID =", avID, "blockID =", blockID);
 
         // 智能筛选菜单项
+        console.log("CaseMate onAVMenu: 准备 addItem 智能筛选");
         detail.menu.addItem({
             id: "caseMate_filter",
             iconHTML: "",
@@ -1013,6 +1025,7 @@ export default class CaseMatePlugin extends Plugin {
                 this.showFilterDialog(avID, detail.element);
             },
         });
+        console.log("CaseMate onAVMenu: addItem 智能筛选完成, menu.menus =", JSON.stringify(detail.menu?.menus?.map((m: any) => m.id || m.label)));
 
         detail.menu.addItem({
             id: "caseMate_statistics",
@@ -1100,6 +1113,28 @@ export default class CaseMatePlugin extends Plugin {
         });
     }
 
+    // ── v3.8.0 兜底：open-menu-av 收不到时，从 open-menu-content 里找数据库块 ──
+    // 思源 v3.8.0 中 open-menu-av 经 emitOpenMenu(protyle.app.plugins) 分发，
+    // 存在插件收不到的情况（右键数据库无 CaseMate 日志）。open-menu-content 为块级
+    // 右键事件，能到达插件；从 detail 元素向上找到带 data-av-id 的数据库块后，
+    // 复用 onAVMenu 的菜单项逻辑。
+
+    private onAVContentMenu(event: any) {
+        const detail = event.detail;
+        if (!detail || !detail.menu) return;
+        // open-menu-content 的 detail.element 可能是数据库块内的任意元素，向上查找
+        let el: any = detail.element || detail.target;
+        while (el && el !== document && typeof el.getAttribute === "function") {
+            if (el.getAttribute("data-av-id")) {
+                console.log("CaseMate onAVContentMenu: 找到数据库块", el.getAttribute("data-av-id"));
+                // 复用 onAVMenu 逻辑（menu 对象不变，element 替换为数据库块元素）
+                this.onAVMenu({ detail: { ...detail, element: el } });
+                return;
+            }
+            el = el.parentElement;
+        }
+    }
+
     // ── 智能筛选对话框（自己实现 DOM 行隐藏，支持范围/通配符/多值） ───────
 
     private async showFilterDialog(avID: string, blockElement: HTMLElement) {
@@ -1124,8 +1159,9 @@ export default class CaseMatePlugin extends Plugin {
         <select id="cmFilterColumn" class="b3-text-field fn__block">${optionsHtml}</select>
     </div>
     <div style="margin-bottom:12px;">
-        <label style="font-weight:500;display:block;margin-bottom:4px;">筛选条件（多个用逗号分隔）</label>
-        <input id="cmFilterValue" class="b3-text-field fn__block" placeholder="例如：1.9,1.9~1.13,*登录*" value="">
+        <label style="font-weight:500;display:block;margin-bottom:4px;">筛选条件（可下拉选择该字段已有内容，也可手动输入，多个用逗号分隔）</label>
+        <input id="cmFilterValue" class="b3-text-field fn__block" placeholder="从下拉选择或输入，例如：1.9,1.9~1.13,*登录*" list="cmFilterOptions" value="">
+        <datalist id="cmFilterOptions"></datalist>
     </div>
     <div style="margin-bottom:4px;color:var(--b3-theme-on-surface-light);font-size:12px;line-height:1.6;">
         智能匹配规则：<br>
@@ -1146,6 +1182,33 @@ export default class CaseMatePlugin extends Plugin {
 
         const columnSelect = dialog.element.querySelector("#cmFilterColumn") as HTMLSelectElement;
         const valueInput = dialog.element.querySelector("#cmFilterValue") as HTMLInputElement;
+        const optionList = dialog.element.querySelector("#cmFilterOptions") as HTMLDataListElement;
+
+        // 加载指定字段的已有内容到下拉列表（去重，支持多选字段的全部选项）
+        const loadFieldOptions = async (columnName: string) => {
+            optionList.innerHTML = "";
+            if (!columnName) return;
+            try {
+                const rawData: any = await fetchPostAsync("/api/av/getAttributeView", { id: avID });
+                const keyValues: any[] = rawData?.av?.keyValues || [];
+                const kv = keyValues.find((k: any) => k.key?.name === columnName);
+                if (!kv) return;
+                const seen = new Set<string>();
+                for (const v of (kv.values || [])) {
+                    for (const t of getFieldAllTexts(v)) {
+                        if (t && !seen.has(t)) {
+                            seen.add(t);
+                            const opt = document.createElement("option");
+                            opt.value = t;
+                            optionList.appendChild(opt);
+                        }
+                    }
+                }
+            } catch (_) { /* ignore */ }
+        };
+
+        columnSelect.addEventListener("change", () => loadFieldOptions(columnSelect.value.trim()));
+        loadFieldOptions(columnSelect.value.trim());
 
         // 获取数据库视图中的行元素（表格/画廊/看板通用：带 data-id 的行）
         const getRowElements = (): HTMLElement[] => {
@@ -1340,6 +1403,17 @@ function getFieldText(v: any): string {
     if (v.number?.content !== undefined) return String(v.number.content);
     if (v.date?.content) return String(v.date.content);
     return "";
+}
+
+/** 从 getAttributeView 的值对象中提取全部文本（多选字段返回所有选项） */
+function getFieldAllTexts(v: any): string[] {
+    if (!v) return [];
+    if (v.mSelect?.length) return v.mSelect.map((o: any) => o?.content).filter(Boolean);
+    if (v.text?.content) return [v.text.content];
+    if (v.block?.content) return [v.block.content];
+    if (v.number?.content !== undefined) return [String(v.number.content)];
+    if (v.date?.content) return [String(v.date.content)];
+    return [];
 }
 
 // ── 智能匹配 ────────────────────────────────────────────────────────────────

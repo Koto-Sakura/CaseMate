@@ -170,6 +170,12 @@ this.eventBus.on("open-menu-av", ...);
 // 取块ID: detail.element.getAttribute("data-node-id")
 ```
 
+> ⚠️ **重要：插件菜单项会进「插件」子菜单**。思源前端 `plugin/EventBus.ts` 的
+> `emitOpenMenu`（v3.7.0 与 v3.8.0 行为一致）会把插件 `detail.menu.addItem(...)` 添加的项
+> 统一收进一个 label 为「插件」的 submenu 中，再追加到右键菜单底部。
+> 因此「智能筛选」「数据统计」的用户入口是：**右键数据库 → 菜单底部「插件」→ 对应项**，
+> 不会出现在菜单顶层。文档/README 中的入口说明需按此写。
+
 ### 4.5 获取文档/父文档信息
 
 ```typescript
@@ -236,6 +242,11 @@ POST /api/filetree/getHPathByID
 5. 「清除筛选」恢复所有行
 ⚠️ 临时过滤：刷新/重新加载数据库后恢复
 ```
+
+**已有内容点选（v0.1.5）**：筛选条件输入框挂 `<datalist id="cmFilterOptions">`，
+切换筛选列时 `loadFieldOptions` 调 `getAttributeView` 读取该列所有已有值（`getFieldAllTexts`
+提取，多选字段返回全部选项，`Set` 去重）填入 datalist，点击输入框即可下拉选择。
+注意 datalist 与输入框联动：选中某项会替换输入框内容，多条件仍需手动加逗号。
 
 ### 5.6 数据统计（runStatistics）
 
